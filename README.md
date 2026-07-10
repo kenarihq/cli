@@ -89,13 +89,12 @@ The versions below are the tool releases this CLI has been verified against.
 | Tool | Minimum tested version | Status |
 | --- | --- | --- |
 | Claude Code | 2.1.206 | verified end to end (switch, tool loop through kenari, restore) |
-| Codex | 0.144.1 | config write and restore verified; running through kenari is blocked, see below |
+| Codex | 0.144.1 | verified end to end (switch, text and tool loop through kenari, restore) |
 
-**Codex status.** Codex removed support for the `chat/completions` wire protocol and now
-requires the OpenAI `responses` API from every provider. The kenari gateway does not serve
-`/v1/responses` yet, so a switched Codex refuses to start with a `wire_api` config error.
-The switch and restore mechanics are tested and safe (restore returns your config unchanged),
-but do not switch Codex until kenari ships `responses` support.
+**Codex wire.** Codex removed the `chat/completions` wire protocol and now requires the
+OpenAI `responses` API. The kenari gateway serves `/v1/responses`, so the Codex adapter
+writes `wire_api = "responses"`. A switched Codex runs against kenari for both plain
+prompts and tool loops.
 
 ## Troubleshooting
 

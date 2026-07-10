@@ -33,7 +33,7 @@ test('apply writes provider table + top-level keys, preserves user content', asy
   assert.match(out, /^model_provider = "kenari"$/m);
   assert.ok(out.includes('[model_providers.kenari]'));
   assert.ok(out.includes('base_url = "https://kenari.id/v1"'));
-  assert.ok(out.includes('wire_api = "chat"'));
+  assert.ok(out.includes('wire_api = "responses"'));
   assert.ok(out.includes(`http_headers = { "Authorization" = "Bearer ${KEY}" }`));
   assert.ok(out.includes('# hand-tuned'));
   assert.ok(out.includes('approval_policy = "never"'));

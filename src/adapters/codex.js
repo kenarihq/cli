@@ -15,7 +15,7 @@ function tableBody(key) {
   return [
     'name = "Kenari"',
     `base_url = "${gatewayBase()}/v1"`,
-    'wire_api = "chat"',
+    'wire_api = "responses"',
     `http_headers = { "Authorization" = "Bearer ${key}" }`,
   ];
 }
