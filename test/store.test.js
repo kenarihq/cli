@@ -82,13 +82,44 @@ test('withLock: serializes, detects stale lock', async () => {
   const out = await withLock(async () => 42);
   assert.equal(out, 42);
   assert.equal(fs.existsSync(lockDir()), false);
-  // stale lock: dead pid
-  fs.mkdirSync(lockDir(), { recursive: true });
-  fs.writeFileSync(path.join(lockDir(), 'pid'), '999999999');
+  // stale lock: dead pid, backdated past the mid-acquisition window
+  fs.writeFileSync(lockDir(), '999999999');
+  const old = new Date(Date.now() - 5000);
+  fs.utimesSync(lockDir(), old, old);
   assert.equal(await withLock(async () => 'ok'), 'ok');
+  assert.equal(fs.existsSync(lockDir()), false);
   // live lock: our own pid counts as another live process
-  fs.mkdirSync(lockDir(), { recursive: true });
-  fs.writeFileSync(path.join(lockDir(), 'pid'), String(process.pid));
+  fs.writeFileSync(lockDir(), String(process.pid));
   await assert.rejects(withLock(async () => 'nope'), KenariError);
-  fs.rmSync(lockDir(), { recursive: true, force: true });
+  fs.rmSync(lockDir(), { force: true });
+});
+
+test('withLock: empty lock file younger than 2s rejects (mid-acquisition)', async () => {
+  const { withLock, KenariError } = await import('../src/store.js');
+  const { lockDir } = await import('../src/paths.js');
+  fs.mkdirSync(path.dirname(lockDir()), { recursive: true });
+  fs.writeFileSync(lockDir(), '');
+  await assert.rejects(withLock(async () => 'nope'), KenariError);
+  fs.rmSync(lockDir(), { force: true });
+});
+
+test('withLock: empty lock file backdated 5s is stale', async () => {
+  const { withLock } = await import('../src/store.js');
+  const { lockDir } = await import('../src/paths.js');
+  fs.mkdirSync(path.dirname(lockDir()), { recursive: true });
+  fs.writeFileSync(lockDir(), '');
+  const old = new Date(Date.now() - 5000);
+  fs.utimesSync(lockDir(), old, old);
+  assert.equal(await withLock(async () => 'ok'), 'ok');
+  assert.equal(fs.existsSync(lockDir()), false);
+});
+
+test('loadState normalizes missing tools', async () => {
+  const { getToolState, setToolState } = await import('../src/store.js');
+  const { statePath } = await import('../src/paths.js');
+  fs.mkdirSync(path.dirname(statePath()), { recursive: true });
+  fs.writeFileSync(statePath(), '{"version":1}');
+  assert.equal(getToolState('x'), null);
+  setToolState('x', { ok: true });
+  assert.deepEqual(getToolState('x'), { ok: true });
 });
