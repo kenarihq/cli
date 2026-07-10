@@ -1,6 +1,6 @@
 import fs from 'node:fs';
 import { codexHome, codexConfigPath, gatewayBase } from '../paths.js';
-import { writeFileAtomic, getToolState, setToolState, clearToolState } from '../store.js';
+import { writeFileAtomic, getToolState, setToolState, clearToolState, KenariError } from '../store.js';
 import * as toml from '../toml.js';
 
 const TABLE = 'model_providers.kenari';
@@ -49,6 +49,14 @@ export default {
     const existing = readConfig();
     let content = existing ?? '';
     const fileCreated = existing === null;
+    // A key present in an unsupported value shape (single-quoted literal, etc.)
+    // is invisible to setTopLevel, which would then INSERT a duplicate and break
+    // Codex's TOML parse. Refuse rather than corrupt the file.
+    for (const k of ['model', 'model_provider']) {
+      if (toml.hasTopLevel(content, k) && toml.getTopLevel(content, k) === null) {
+        throw new KenariError(`${k} in config.toml uses a value format this CLI cannot edit safely; edit it by hand or remove the line, then retry`);
+      }
+    }
     const prior = getToolState('codex');
     const currentVals = {
       model: toml.getTopLevel(content, 'model'),

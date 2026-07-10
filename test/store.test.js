@@ -114,6 +114,14 @@ test('withLock: empty lock file backdated 5s is stale', async () => {
   assert.equal(fs.existsSync(lockDir()), false);
 });
 
+test('loadState rejects a newer state schema version', async () => {
+  const { loadState, KenariError } = await import('../src/store.js');
+  const { statePath } = await import('../src/paths.js');
+  fs.mkdirSync(path.dirname(statePath()), { recursive: true });
+  fs.writeFileSync(statePath(), '{"version":2,"tools":{}}');
+  assert.throws(() => loadState(), KenariError);
+});
+
 test('loadState normalizes missing tools', async () => {
   const { getToolState, setToolState } = await import('../src/store.js');
   const { statePath } = await import('../src/paths.js');

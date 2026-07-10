@@ -49,13 +49,28 @@ async function ensureKey() {
 }
 
 async function buildMapping(adapter, key, flags) {
+  // Validate any flag-provided slot value up front. A bare `--opus` (no value)
+  // parses as boolean true; it must fail with a clear message naming the slot
+  // instead of slipping through as a bogus model id or an unvalidated offline
+  // value.
+  for (const slot of adapter.slots) {
+    if (flags[slot.id] !== undefined) {
+      const chosen = flags[slot.id];
+      if (!(typeof chosen === 'string' && chosen.length > 0 && !chosen.startsWith('--'))) {
+        throw new KenariError(`--${slot.id} needs a model id (e.g. --${slot.id} glm-5-2)`);
+      }
+    }
+  }
   let catalog = null;
   try { catalog = await fetchModels(key); }
   catch (e) {
     if (e instanceof AuthError) throw e;
     const allProvided = adapter.slots.every((s) => flags[s.id]);
-    if (!allProvided) throw e;
+    if (!allProvided) throw new KenariError(e.message + '. To apply without validation, pass every slot flag explicitly.');
     console.log('warning: cannot reach gateway, applying without validation');
+  }
+  if (catalog && catalog.length === 0) {
+    throw new KenariError('the kenari catalog returned no models; try again later');
   }
   const ids = catalog ? new Set(catalog.map((m) => m.id)) : null;
   const mapping = {};
@@ -155,6 +170,11 @@ async function cmdKey(argv) {
       if (!a.detect().installed) continue;
       const st = a.status();
       if (st.provider === 'kenari') {
+        const vals = Object.values(st.mapping || {});
+        if (vals.length === 0 || vals.some((v) => v === null || v === undefined || v === '')) {
+          console.log(`warning: skipped re-applying to ${a.id} (its mapping is missing a model; run: kenari use ${a.id})`);
+          continue;
+        }
         await withLock(() => a.apply(st.mapping, key));
         console.log(`re-applied to ${a.id}`);
       }

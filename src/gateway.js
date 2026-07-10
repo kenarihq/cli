@@ -16,12 +16,17 @@ export async function fetchModels(key) {
   }
   if (!res.ok) throw new KenariError(`gateway error (HTTP ${res.status})`);
   const body = await res.json();
-  return (body.data || []).map((m) => ({
-    id: m.id,
-    in: m.pricing?.prompt ?? null,
-    out: m.pricing?.completion ?? null,
-    context: m.context_length ?? null,
-  }));
+  return (body.data || []).map((m) => {
+    // Only trust prices in the gateway's documented unit. An unknown unit
+    // (or a future one) must not be printed as rupiah, so treat in/out as null.
+    const knownUnit = !m.pricing?.unit || m.pricing.unit === 'micro_idr_per_1m_tokens';
+    return {
+      id: m.id,
+      in: knownUnit ? (m.pricing?.input ?? null) : null,
+      out: knownUnit ? (m.pricing?.output ?? null) : null,
+      context: m.context_length ?? null,
+    };
+  });
 }
 
 export function formatRp(microPer1M) {

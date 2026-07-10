@@ -53,10 +53,11 @@ export function getKey() {
   return c && typeof c.api_key === 'string' ? c.api_key : null;
 }
 export function setKey(key) {
-  if (!/^kn-[A-Za-z0-9]{8,}$/.test(key)) {
+  const k = key.trim();
+  if (!/^kn-[A-Za-z0-9]{8,}$/.test(k)) {
     throw new KenariError('That does not look like a kenari API key (kn-...). Get one at https://kenari.id/keys');
   }
-  writeJson(credentialsPath(), { api_key: key });
+  writeJson(credentialsPath(), { api_key: k });
 }
 export function deleteKey() {
   try { fs.rmSync(credentialsPath()); } catch {}
@@ -67,6 +68,9 @@ export function maskKey(key) {
 
 export function loadState() {
   const parsed = readJson(statePath());
+  if (parsed && parsed.version && parsed.version !== 1) {
+    throw new KenariError('state.json was written by a newer kenari CLI; upgrade this CLI or remove ~/.kenari/state.json');
+  }
   return { version: 1, tools: (parsed && typeof parsed.tools === 'object' && parsed.tools) || {} };
 }
 export function saveState(state) { writeJson(statePath(), state); }
@@ -90,6 +94,7 @@ export async function withLock(fn) {
     fs.mkdirSync(path.dirname(lockPath), { recursive: true });
     // O_EXCL: the lock file itself is the lock, atomic create-or-fail.
     fs.writeFileSync(lockPath, String(process.pid), { flag: 'wx' });
+    try { fs.chmodSync(lockPath, 0o600); } catch {}
   };
   try { acquire(); }
   catch (e) {

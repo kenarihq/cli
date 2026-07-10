@@ -38,6 +38,18 @@ function tableBounds(lines, header) {
   return { start, end };
 }
 
+// Value-agnostic presence check for a top-level key. Unlike getTopLevel/keyRe
+// (which only recognize double-quoted string scalars), this matches any value
+// shape (single-quoted literals, numbers, booleans, arrays) so a caller can
+// detect a key this patcher cannot safely edit and refuse rather than insert a
+// duplicate.
+export function hasTopLevel(content, key) {
+  const lines = toLines(content);
+  const top = lines.slice(0, headerIndex(lines));
+  const re = new RegExp(`^\\s*${escapeRe(key)}\\s*=`);
+  return top.some((l) => re.test(l));
+}
+
 export function getTopLevel(content, key) {
   const lines = toLines(content);
   const top = lines.slice(0, headerIndex(lines));

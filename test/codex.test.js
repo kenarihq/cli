@@ -136,6 +136,16 @@ test('hand-edited table conflicts, second restore finishes after user removes it
   assert.equal(r2.restored, true);
 });
 
+test('apply refuses a single-quoted (literal) top-level key, leaves file untouched', async () => {
+  const codex = (await import('../src/adapters/codex.js')).default;
+  const { KenariError } = await import('../src/store.js');
+  fs.mkdirSync(cxdir, { recursive: true });
+  const literal = "model = 'gpt-5-5'\napproval_policy = \"never\"\n";
+  fs.writeFileSync(cfg, literal);
+  assert.throws(() => codex.apply({ model: 'glm-5-2' }, KEY), KenariError);
+  assert.equal(fs.readFileSync(cfg, 'utf8'), literal);
+});
+
 test('restore without state reports not switched', async () => {
   const codex = (await import('../src/adapters/codex.js')).default;
   const r = codex.restore();

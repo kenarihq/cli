@@ -41,9 +41,9 @@ function stubGateway(models) {
 }
 
 const CATALOG = [
-  { id: 'glm-5-2', pricing: { prompt: 13600000000, completion: 43200000000 }, context_length: 1048576 },
-  { id: 'kimi-k2-7-code', pricing: { prompt: 10400000000, completion: 53600000000 }, context_length: 262144 },
-  { id: 'deepseek-v4-flash', pricing: { prompt: 1700000000, completion: 3400000000 }, context_length: 1048576 },
+  { id: 'glm-5-2', pricing: { input: 13600000000, output: 43200000000, currency: 'IDR', unit: 'micro_idr_per_1m_tokens' }, context_length: 1048576 },
+  { id: 'kimi-k2-7-code', pricing: { input: 10400000000, output: 53600000000, currency: 'IDR', unit: 'micro_idr_per_1m_tokens' }, context_length: 262144 },
+  { id: 'deepseek-v4-flash', pricing: { input: 1700000000, output: 3400000000, currency: 'IDR', unit: 'micro_idr_per_1m_tokens' }, context_length: 1048576 },
 ];
 
 test('status: not found / default lifecycle', async () => {
@@ -89,6 +89,15 @@ test('use claude with a model id missing from catalog fails', async () => {
   setKey('kn-testkey123');
   assert.equal(await run('use', 'claude', '--opus', 'not-a-model'), 1);
   assert.match(logs(), /not-a-model/);
+});
+
+test('use claude with a valueless flag fails naming the slot', async () => {
+  fs.mkdirSync(process.env.CLAUDE_CONFIG_DIR, { recursive: true });
+  process.env.KENARI_BASE_URL = await stubGateway(CATALOG);
+  const { setKey } = await import('../src/store.js');
+  setKey('kn-testkey123');
+  assert.equal(await run('use', 'claude', '--opus'), 1);
+  assert.match(logs(), /opus/);
 });
 
 test('bad key: use fails with auth message', async () => {

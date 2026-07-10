@@ -18,7 +18,7 @@ test('fetchModels: happy path maps pricing and context', async () => {
     assert.equal(req.headers.authorization, 'Bearer kn-testkey123');
     res.setHeader('content-type', 'application/json');
     res.end(JSON.stringify({ data: [
-      { id: 'glm-5-2', pricing: { prompt: 13600000000, completion: 43200000000 }, context_length: 1048576 },
+      { id: 'glm-5-2', pricing: { input: 13600000000, output: 43200000000, cache_read: 3400000000, cache_write: 17000000000, free: false, currency: 'IDR', unit: 'micro_idr_per_1m_tokens' }, context_length: 1048576 },
       { id: 'gpt-image-2' },
     ]}));
   });
@@ -27,6 +27,19 @@ test('fetchModels: happy path maps pricing and context', async () => {
   const models = await fetchModels('kn-testkey123');
   assert.deepEqual(models[0], { id: 'glm-5-2', in: 13600000000, out: 43200000000, context: 1048576 });
   assert.deepEqual(models[1], { id: 'gpt-image-2', in: null, out: null, context: null });
+});
+
+test('fetchModels: unknown pricing unit maps in/out to null (no garbage rupiah)', async () => {
+  const base = await stub((req, res) => {
+    res.setHeader('content-type', 'application/json');
+    res.end(JSON.stringify({ data: [
+      { id: 'weird-model', pricing: { input: 5000000000, unit: 'usd_per_token' }, context_length: 1000 },
+    ]}));
+  });
+  process.env.KENARI_BASE_URL = base;
+  const { fetchModels } = await import('../src/gateway.js');
+  const models = await fetchModels('kn-testkey123');
+  assert.deepEqual(models[0], { id: 'weird-model', in: null, out: null, context: 1000 });
 });
 
 test('fetchModels: 401 raises AuthError, 500 raises KenariError, refused raises KenariError', async () => {
