@@ -80,3 +80,43 @@ test('content outside owned regions always survives', () => {
   const out = toml.setTable(withComment, 'model_providers.kenari', ['name = "Kenari"']);
   assert.ok(out.includes('# tail comment'));
 });
+
+// A mixed-EOL file: top region uses CRLF, one table uses LF, the other CRLF.
+// Dominant eol here is CRLF (6 CRLF vs 3 LF line endings).
+const MIXED = [
+  '# my codex config\r\n',
+  'model = "gpt-5-5"\r\n',
+  'approval_policy = "never"\r\n',
+  '\r\n',
+  '[profiles.work]\n',
+  'model = "o5"\n',
+  'extra = "keep"\n',
+  '\r\n',
+  '[mcp_servers.db]\r\n',
+  'command = "npx"\r\n',
+].join('');
+
+test('mixed-EOL setTopLevel keeps every table, line, and key', () => {
+  const out = toml.setTopLevel(MIXED, 'model', 'glm-5-2');
+  // the edit landed
+  assert.equal(toml.getTopLevel(out, 'model'), 'glm-5-2');
+  // nothing merged or destroyed: both headers and every key still present
+  assert.ok(out.includes('[profiles.work]'));
+  assert.ok(out.includes('[mcp_servers.db]'));
+  assert.ok(out.includes('extra = "keep"'));
+  assert.ok(out.includes('command = "npx"'));
+  assert.equal(toml.getTopLevel(out, 'approval_policy'), 'never');
+  assert.equal(toml.getTableText(out, 'profiles.work'), '[profiles.work]\nmodel = "o5"\nextra = "keep"');
+  // output uses the dominant eol (CRLF) uniformly: no lone LF survives
+  assert.ok(out.includes('\r\n'));
+  assert.ok(!/(?<!\r)\n/.test(out));
+});
+
+test('mixed-EOL setTable replace does not duplicate the table', () => {
+  const out = toml.setTable(MIXED, 'profiles.work', ['model = "o5"']);
+  const headers = out.match(/\[profiles\.work\]/g) || [];
+  assert.equal(headers.length, 1);
+  // the LF-terminated old body was found and replaced, not appended after
+  assert.ok(!out.includes('extra = "keep"'));
+  assert.ok(out.includes('[mcp_servers.db]'));
+});

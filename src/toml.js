@@ -4,8 +4,20 @@
 // Everything else is passed through byte for byte. This is not a TOML
 // round-tripper and must never claim to be one.
 
-function eolOf(content) { return content.includes('\r\n') ? '\r\n' : '\n'; }
-function toLines(content, eol) { return content.length ? content.split(eol) : []; }
+// EOL-agnostic line logic. We split on /\r?\n/ so a trailing '\r' is stripped
+// per line, then rejoin with the file's DOMINANT eol. A mixed-EOL file (some
+// CRLF, some LF, realistic for hand-edited configs touched by several
+// editors/OSes) is therefore normalized to its dominant eol on the first edit.
+// That is benign; the previous behavior (split on one fixed eol) silently
+// merged and then destroyed the differently-terminated lines.
+function dominantEol(content) {
+  let crlf = 0; let lf = 0;
+  for (let i = 0; i < content.length; i += 1) {
+    if (content[i] === '\n') { if (content[i - 1] === '\r') crlf += 1; else lf += 1; }
+  }
+  return crlf > lf ? '\r\n' : '\n';
+}
+function toLines(content) { return content.length ? content.split(/\r?\n/) : []; }
 function headerIndex(lines) {
   const i = lines.findIndex((l) => /^\s*\[/.test(l));
   return i === -1 ? lines.length : i;
@@ -27,8 +39,7 @@ function tableBounds(lines, header) {
 }
 
 export function getTopLevel(content, key) {
-  const eol = eolOf(content);
-  const lines = toLines(content, eol);
+  const lines = toLines(content);
   const top = lines.slice(0, headerIndex(lines));
   for (const line of top) {
     const m = line.match(keyRe(key));
@@ -38,8 +49,8 @@ export function getTopLevel(content, key) {
 }
 
 export function setTopLevel(content, key, value) {
-  const eol = eolOf(content);
-  const lines = toLines(content, eol);
+  const eol = dominantEol(content);
+  const lines = toLines(content);
   const hi = headerIndex(lines);
   const re = keyRe(key);
   for (let i = 0; i < hi; i += 1) {
@@ -58,8 +69,8 @@ export function setTopLevel(content, key, value) {
 }
 
 export function deleteTopLevel(content, key) {
-  const eol = eolOf(content);
-  const lines = toLines(content, eol);
+  const eol = dominantEol(content);
+  const lines = toLines(content);
   const hi = headerIndex(lines);
   const re = keyRe(key);
   for (let i = 0; i < hi; i += 1) {
@@ -69,16 +80,15 @@ export function deleteTopLevel(content, key) {
 }
 
 export function getTableText(content, header) {
-  const eol = eolOf(content);
-  const lines = toLines(content, eol);
+  const lines = toLines(content);
   const b = tableBounds(lines, header);
   if (!b) return null;
   return lines.slice(b.start, b.end).join('\n'); // normalized \n for comparisons
 }
 
 export function setTable(content, header, bodyLines) {
-  const eol = eolOf(content);
-  const lines = toLines(content, eol);
+  const eol = dominantEol(content);
+  const lines = toLines(content);
   const table = [`[${header}]`, ...bodyLines];
   const b = tableBounds(lines, header);
   if (b) {
@@ -94,8 +104,8 @@ export function setTable(content, header, bodyLines) {
 }
 
 export function deleteTable(content, header) {
-  const eol = eolOf(content);
-  const lines = toLines(content, eol);
+  const eol = dominantEol(content);
+  const lines = toLines(content);
   const b = tableBounds(lines, header);
   if (!b) return content;
   let start = b.start;
