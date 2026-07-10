@@ -12,6 +12,10 @@ function ownedValues(mapping, key) {
   return {
     ANTHROPIC_BASE_URL: gatewayBase(),
     ANTHROPIC_AUTH_TOKEN: key,
+    // Pin the main loop too: without this, a session on an Anthropic-native
+    // model (for example claude-fable-5) sends that id through the gateway
+    // untouched, and if the gateway catalogs it, it bills at premium price.
+    ANTHROPIC_MODEL: mapping.sonnet,
     [SLOT_ENV.opus]: mapping.opus,
     [SLOT_ENV.sonnet]: mapping.sonnet,
     [SLOT_ENV.haiku]: mapping.haiku,

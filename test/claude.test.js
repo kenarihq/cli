@@ -33,6 +33,7 @@ test('apply on missing file creates minimal settings; restore deletes it', async
   assert.equal(s.env.ANTHROPIC_DEFAULT_OPUS_MODEL, 'glm-5-2');
   assert.equal(s.env.ANTHROPIC_DEFAULT_SONNET_MODEL, 'kimi-k2-7-code');
   assert.equal(s.env.ANTHROPIC_DEFAULT_HAIKU_MODEL, 'deepseek-v4-flash');
+  assert.equal(s.env.ANTHROPIC_MODEL, 'kimi-k2-7-code'); // main loop pinned to sonnet slot
   assert.equal(s.env.ANTHROPIC_SMALL_FAST_MODEL, undefined);
   assert.equal(claude.status().provider, 'kenari');
   const r = claude.restore();
@@ -46,15 +47,17 @@ test('user keys and prior env values survive the round trip', async () => {
   fs.mkdirSync(cdir, { recursive: true });
   fs.writeFileSync(path.join(cdir, 'settings.json'), JSON.stringify({
     theme: 'dark',
-    env: { ANTHROPIC_DEFAULT_OPUS_MODEL: 'claude-opus-4-8', HTTP_PROXY: 'http://p:1' },
+    env: { ANTHROPIC_DEFAULT_OPUS_MODEL: 'claude-opus-4-8', ANTHROPIC_MODEL: 'claude-sonnet-5', HTTP_PROXY: 'http://p:1' },
   }));
   claude.apply(MAPPING, KEY);
   assert.equal(settings().theme, 'dark');
   assert.equal(settings().env.HTTP_PROXY, 'http://p:1');
+  assert.equal(settings().env.ANTHROPIC_MODEL, 'kimi-k2-7-code');
   claude.restore();
   const s = settings();
   assert.equal(s.theme, 'dark');
   assert.equal(s.env.ANTHROPIC_DEFAULT_OPUS_MODEL, 'claude-opus-4-8');
+  assert.equal(s.env.ANTHROPIC_MODEL, 'claude-sonnet-5'); // user's prior pin restored
   assert.equal(s.env.HTTP_PROXY, 'http://p:1');
   assert.equal(s.env.ANTHROPIC_BASE_URL, undefined);
   assert.equal(s.env.ANTHROPIC_AUTH_TOKEN, undefined);
