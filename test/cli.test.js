@@ -139,7 +139,7 @@ test('key show masked, key delete', async () => {
   const { setKey, getKey } = await import('../src/store.js');
   setKey('kn-f4kef4kef4kef4kef4kef4kef4ke1234');
   assert.equal(await run('key', 'show'), 0);
-  assert.match(logs(), /kn-036\.\.\./);
+  assert.match(logs(), /kn-f4k\.\.\./);
   assert.ok(!logs().includes(getKey()));
   out = [];
   assert.equal(await run('key', 'delete'), 0);
