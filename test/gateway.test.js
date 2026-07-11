@@ -29,6 +29,19 @@ test('fetchModels: happy path maps pricing and context', async () => {
   assert.deepEqual(models[1], { id: 'gpt-image-2', in: null, out: null, context: null });
 });
 
+test('fetchModels: free route lists Rp0 even when reference prices are set', async () => {
+  const base = await stub((req, res) => {
+    res.setHeader('content-type', 'application/json');
+    res.end(JSON.stringify({ data: [
+      { id: 'deepseek-v4-flash:free', pricing: { input: 1900000000, output: 3800000000, free: true, currency: 'IDR', unit: 'micro_idr_per_1m_tokens' }, context_length: 1048576 },
+    ]}));
+  });
+  process.env.KENARI_BASE_URL = base;
+  const { fetchModels } = await import('../src/gateway.js');
+  const models = await fetchModels('kn-testkey123');
+  assert.deepEqual(models[0], { id: 'deepseek-v4-flash:free', in: 0, out: 0, context: 1048576 });
+});
+
 test('fetchModels: unknown pricing unit maps in/out to null (no garbage rupiah)', async () => {
   const base = await stub((req, res) => {
     res.setHeader('content-type', 'application/json');

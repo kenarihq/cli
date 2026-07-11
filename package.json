@@ -1,6 +1,6 @@
 {
   "name": "@kenarihq/cli",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "Official kenari CLI. Switch Claude Code and Codex to the kenari gateway.",
   "license": "MIT",
   "type": "module",
@@ -8,5 +8,5 @@
   "files": ["bin", "src", "README.md", "LICENSE"],
   "engines": { "node": ">=18" },
   "scripts": { "test": "node --test" },
-  "repository": { "type": "git", "url": "https://github.com/kenarihq/cli" }
+  "repository": { "type": "git", "url": "git+https://github.com/kenarihq/cli.git" }
 }

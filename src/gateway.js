@@ -20,10 +20,13 @@ export async function fetchModels(key) {
     // Only trust prices in the gateway's documented unit. An unknown unit
     // (or a future one) must not be printed as rupiah, so treat in/out as null.
     const knownUnit = !m.pricing?.unit || m.pricing.unit === 'micro_idr_per_1m_tokens';
+    // pricing.free means a no-charge route: the numbers are the reference rate
+    // card, but the customer is billed Rp0, so that is what we list.
+    const free = m.pricing?.free === true;
     return {
       id: m.id,
-      in: knownUnit ? (m.pricing?.input ?? null) : null,
-      out: knownUnit ? (m.pricing?.output ?? null) : null,
+      in: free ? 0 : knownUnit ? (m.pricing?.input ?? null) : null,
+      out: free ? 0 : knownUnit ? (m.pricing?.output ?? null) : null,
       context: m.context_length ?? null,
     };
   });
