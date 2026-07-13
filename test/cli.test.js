@@ -112,7 +112,7 @@ test('bad key: use fails with auth message', async () => {
 test('no key non-TTY: use fails with instruction', async () => {
   fs.mkdirSync(process.env.CLAUDE_CONFIG_DIR, { recursive: true });
   assert.equal(await run('use', 'claude'), 1);
-  assert.match(logs(), /kenari key set/);
+  assert.match(logs(), /kenari login/);
 });
 
 test('use unknown tool / not-installed tool fail cleanly', async () => {

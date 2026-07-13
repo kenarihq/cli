@@ -23,14 +23,27 @@ Node 18 or newer is required.
 
 ## Quick start
 
+Sign in and store an API key:
+
+```
+kenari login
+```
+
+This opens your browser to approve the CLI, then stores the key for you, no copy-pasting a key
+by hand. On a machine with no browser, or where the loopback callback is blocked (a remote SSH
+box), use `kenari login --paste` instead: it prints a URL to open elsewhere and asks you to
+paste back a short code. Add `--no-browser` to either mode to print the URL instead of opening
+it automatically.
+
 Point Claude Code at kenari:
 
 ```
 kenari use claude
 ```
 
-The first run asks for a kenari API key (`kn-...`, from https://kenari.id/keys) and stores it.
-It then lets you pick a kenari model for each Claude slot (opus, sonnet, haiku).
+If no key is stored yet, this asks for one (`kn-...`, from https://kenari.id/keys) directly; run
+`kenari login` first if you would rather authenticate that way. It then lets you pick a kenari
+model for each Claude slot (opus, sonnet, haiku).
 
 Check what each tool points at:
 
@@ -49,6 +62,9 @@ kenari use claude default
 | Command | What it does |
 | --- | --- |
 | `kenari` | Interactive switcher. Lists installed tools and lets you pick a target. |
+| `kenari login` | Sign in through the browser (PKCE) and store an API key. |
+| `kenari login --no-browser` | Print the approval URL instead of opening it. |
+| `kenari login --paste` | Paste-code mode, for a blocked loopback or a remote box. |
 | `kenari use <tool>` | Switch `<tool>` to kenari. Prompts for models unless you pass flags. |
 | `kenari use <tool> default` | Restore `<tool>` to the provider it used before the switch. |
 | `kenari status` | Show whether each tool points at kenari or its default. |
@@ -66,6 +82,17 @@ Model flags for `kenari use`:
 
 Pass any of these to skip the interactive prompt. A model that is not in the kenari catalog is
 rejected. Run `kenari models` to see valid ids.
+
+## How login works
+
+`kenari login` opens `https://kenari.id/cli-auth` in your browser with a PKCE challenge and
+binds a one-shot local server on a random loopback port. Approving in the browser redirects
+back to that local server with a single-use code; the CLI exchanges it for an API key over
+`https://kenari.id/api/cli-auth/token` and stores the key. The verifier never leaves your
+machine, and the flow times out after 5 minutes if nothing comes back. `kenari login --paste`
+skips the local server entirely: it shows a short code in the browser that you type back into
+the terminal, for machines where a browser cannot reach a loopback port on your machine (a
+remote SSH box) or where you would rather not open one automatically.
 
 ## How switching works
 
@@ -106,8 +133,13 @@ real file, or edit the config by hand.
 Wait for the other run to finish, then retry. If no other run exists, a stale lock in
 `~/.kenari/lock` is cleared automatically after a few seconds.
 
-**"kenari rejected the API key (HTTP 401)."** The stored key is missing, wrong, or revoked. Get
-a fresh key at https://kenari.id/keys and run `kenari key set`.
+**"kenari rejected the API key (HTTP 401)."** The stored key is missing, wrong, or revoked. Run
+`kenari login` to get a fresh one, or grab one at https://kenari.id/keys and run `kenari key
+set`.
+
+**"login timed out, run `kenari login` again."** Nobody approved the browser page within 5
+minutes. Run it again and approve promptly, or use `kenari login --paste` if the browser cannot
+reach your machine's loopback port.
 
 ## License
 
