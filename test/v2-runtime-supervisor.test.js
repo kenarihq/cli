@@ -133,6 +133,7 @@ test('Codex launch injects temporary controls before original args', () => {
   ));
   assert.ok(built.args.includes('model_providers.kenari_router.requires_openai_auth=true'));
   assert.ok(built.args.includes('model_providers.kenari_router.supports_websockets=false'));
+  assert.ok(built.args.includes('features.enable_request_compression=false'));
   assert.equal(built.env.OPENAI_API_KEY, 'secret');
   assert.equal(built.env.KEEP, 'yes');
   const native = [{
@@ -149,6 +150,18 @@ test('Codex launch injects temporary controls before original args', () => {
     routerUrl: 'http://127.0.0.1:2',
     args: ['-c', 'openai_base_url="https://bypass.example"'],
   }), /unsafe Codex routing override/);
+  for (const args of [
+    ['-c', 'features.enable_request_compression=true'],
+    ['--config=features.enable_request_compression=true'],
+    ['--enable', 'enable_request_compression'],
+    ['--enable=enable_request_compression'],
+  ]) {
+    assert.throws(() => buildCodexLaunch({
+      toolConfig: { roles: {} },
+      routerUrl: 'http://127.0.0.1:2',
+      args,
+    }), /unsafe Codex routing override/, args.join(' '));
+  }
 });
 
 test('Codex native upstream follows the active login method', () => {
