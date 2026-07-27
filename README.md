@@ -62,6 +62,9 @@ Every role can stay `native` or select a fixed `kenari/<model-id>`. Codex main
 also supports `picker`. Codex review and subagents also support `inherit`.
 Native is always the default.
 
+For Codex, Kenari detects whether `codex login` uses ChatGPT or an API key and
+keeps native requests on the matching OpenAI upstream.
+
 Automation must set every role:
 
 ```bash

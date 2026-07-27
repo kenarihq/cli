@@ -5,7 +5,13 @@ import os from 'node:os';
 import path from 'node:path';
 import http from 'node:http';
 import { buildClaudeLaunch, findClaudeEnvConflicts } from '../src/runtime/claude.js';
-import { buildCodexLaunch, codexKenariModels } from '../src/runtime/codex.js';
+import {
+  CODEX_API_BASE_URL,
+  CODEX_CHATGPT_BASE_URL,
+  buildCodexLaunch,
+  codexKenariModels,
+  resolveCodexNativeBase,
+} from '../src/runtime/codex.js';
 import { resolveBinary, runWrappedTool } from '../src/supervisor.js';
 
 const originalAllowHttp = process.env.KENARI_ALLOW_HTTP;
@@ -121,7 +127,12 @@ test('Codex launch injects temporary controls before original args', () => {
   });
   assert.deepEqual(built.args.slice(-4), ['exec', '-c', 'review_model="native-review"', 'hello']);
   assert.ok(built.args.indexOf('review_model="kenari/reviewer"') < built.args.indexOf('exec'));
-  assert.ok(built.args.includes('openai_base_url="http://127.0.0.1:2"'));
+  assert.ok(built.args.includes('model_provider="kenari_router"'));
+  assert.ok(built.args.includes(
+    'model_providers.kenari_router.base_url="http://127.0.0.1:2"',
+  ));
+  assert.ok(built.args.includes('model_providers.kenari_router.requires_openai_auth=true'));
+  assert.ok(built.args.includes('model_providers.kenari_router.supports_websockets=false'));
   assert.equal(built.env.OPENAI_API_KEY, 'secret');
   assert.equal(built.env.KEEP, 'yes');
   const native = [{
@@ -138,6 +149,64 @@ test('Codex launch injects temporary controls before original args', () => {
     routerUrl: 'http://127.0.0.1:2',
     args: ['-c', 'openai_base_url="https://bypass.example"'],
   }), /unsafe Codex routing override/);
+});
+
+test('Codex native upstream follows the active login method', () => {
+  const cases = [
+    {
+      name: 'ChatGPT stdout',
+      result: { status: 0, stdout: 'Logged in using ChatGPT\n', stderr: '' },
+      expected: CODEX_CHATGPT_BASE_URL,
+    },
+    {
+      name: 'ChatGPT after warning',
+      result: {
+        status: 0,
+        stdout: 'Logged in using ChatGPT\n',
+        stderr: 'WARNING: could not create PATH aliases\n',
+      },
+      expected: CODEX_CHATGPT_BASE_URL,
+    },
+    {
+      name: 'API key',
+      result: { status: 0, stdout: 'Logged in using an API key\n', stderr: '' },
+      expected: CODEX_API_BASE_URL,
+    },
+  ];
+  for (const entry of cases) {
+    const calls = [];
+    const base = resolveCodexNativeBase('/bin/codex', {}, (...args) => {
+      calls.push(args);
+      return entry.result;
+    });
+    assert.equal(base, entry.expected, entry.name);
+    assert.deepEqual(calls[0].slice(0, 2), ['/bin/codex', ['login', 'status']], entry.name);
+  }
+});
+
+test('Codex native upstream override and API key fallback are deterministic', () => {
+  let calls = 0;
+  const override = resolveCodexNativeBase('/bin/codex', {
+    KENARI_CODEX_NATIVE_BASE_URL: 'https://proxy.example/v1',
+  }, () => {
+    calls += 1;
+    return {};
+  });
+  assert.equal(override, 'https://proxy.example/v1');
+  assert.equal(calls, 0);
+
+  const fallback = resolveCodexNativeBase('/bin/codex', {
+    OPENAI_API_KEY: 'sk-test',
+  }, () => ({ status: 1, stdout: '', stderr: 'Not logged in' }));
+  assert.equal(fallback, CODEX_API_BASE_URL);
+});
+
+test('Codex native upstream fails closed when login method is unknown', () => {
+  assert.throws(() => resolveCodexNativeBase(
+    '/bin/codex',
+    {},
+    () => ({ status: 1, stdout: '', stderr: 'Not logged in' }),
+  ), /cannot determine Codex login method/);
 });
 
 test('resolveBinary skips excluded wrapper and supervisor returns child exit code', async (t) => {
