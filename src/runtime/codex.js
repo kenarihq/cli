@@ -41,6 +41,10 @@ export function loadCodexNativeModels(binary, env = process.env) {
   throw new KenariError('cannot read the Codex native model catalog');
 }
 
+function normalizeModelId(id) {
+  return String(id || '').replace(/\./g, '-');
+}
+
 export function codexKenariModels(cache, nativeModels = []) {
   const fallbackTemplate = nativeModels[0];
   if ((cache?.models || []).length && !fallbackTemplate) {
@@ -48,11 +52,13 @@ export function codexKenariModels(cache, nativeModels = []) {
   }
   const basePriority = Math.max(0, ...nativeModels.map((model) => model.priority || 0));
   return (cache?.models || []).map((model, index) => {
-    const template = nativeModels.find((native) => native.slug === model.id) || fallbackTemplate;
+    const normalizedId = normalizeModelId(model.id);
+    const template = nativeModels.find((native) => normalizeModelId(native.slug) === normalizedId)
+      || fallbackTemplate;
     const efforts = model.reasoning_efforts?.length
       ? model.reasoning_efforts
       : (template.supported_reasoning_levels || []).map((level) => level.effort);
-    return {
+    const entry = {
       ...template,
       slug: `kenari/${model.id}`,
       display_name: `Kenari ${model.id}`,
@@ -69,6 +75,14 @@ export function codexKenariModels(cache, nativeModels = []) {
       max_context_window: model.context_limit || template.max_context_window,
       upgrade: null,
     };
+    // Kenari-routed models must use classic top-level function tools. The gpt-5.6
+    // templates carry OpenAI-private harness modes: in code_mode Codex sends an empty
+    // tools array and hides the real definitions in an "additional_tools" input item
+    // that only OpenAI's own backend expands, so the model ends up with no tools.
+    delete entry.tool_mode;
+    delete entry.multi_agent_version;
+    entry.use_responses_lite = false;
+    return entry;
   });
 }
 

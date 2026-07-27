@@ -164,6 +164,50 @@ test('Codex launch injects temporary controls before original args', () => {
   }
 });
 
+test('codexKenariModels removes OpenAI-private mode fields and matches dotted native slugs', () => {
+  const native = [{
+    slug: 'gpt-5.6-sol',
+    tool_mode: 'code_mode',
+    use_responses_lite: true,
+    multi_agent_version: 'v2',
+    supported_reasoning_levels: [{ effort: 'low', description: 'Low' }],
+    context_window: 100000,
+    max_context_window: 100000,
+    priority: 10,
+  }, {
+    slug: 'gpt-5.5',
+    supported_reasoning_levels: [{ effort: 'low', description: 'Low' }],
+    context_window: 100000,
+    max_context_window: 100000,
+    priority: 5,
+  }];
+  const kenari = codexKenariModels({
+    models: [
+      { id: 'gpt-5-6-sol', context_limit: 200000, reasoning_efforts: ['medium', 'high'] },
+      { id: 'glm-5-2', context_limit: 128000 },
+    ],
+  }, native);
+  const sol = kenari.find((m) => m.slug === 'kenari/gpt-5-6-sol');
+  assert.ok(sol, 'gpt-5-6-sol entry exists');
+  assert.equal(sol.context_window, 200000);
+  assert.equal(sol.priority, 11);
+  assert.equal('tool_mode' in sol, false);
+  assert.equal('multi_agent_version' in sol, false);
+  assert.equal(sol.use_responses_lite, false);
+  assert.deepEqual(sol.supported_reasoning_levels, [
+    { effort: 'medium', description: 'medium reasoning' },
+    { effort: 'high', description: 'high reasoning' },
+  ]);
+  assert.equal(sol.max_context_window, 200000);
+
+  const glm = kenari.find((m) => m.slug === 'kenari/glm-5-2');
+  assert.ok(glm, 'glm-5-2 entry exists');
+  assert.equal(glm.context_window, 128000);
+  assert.equal('tool_mode' in glm, false);
+  assert.equal('multi_agent_version' in glm, false);
+  assert.equal(glm.use_responses_lite, false);
+});
+
 test('Codex native upstream follows the active login method', () => {
   const cases = [
     {
