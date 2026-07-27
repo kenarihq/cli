@@ -32,7 +32,11 @@ import { gatewayBase, modelCachePath, runtimeDir } from './paths.js';
 import { genPkce, genState, buildLoopbackUrl, buildPasteUrl, startCallbackServer } from './oauth.js';
 import { resolveBinary, runWrappedTool } from './supervisor.js';
 import { buildClaudeLaunch } from './runtime/claude.js';
-import { buildCodexLaunch, loadCodexNativeModels } from './runtime/codex.js';
+import {
+  buildCodexLaunch,
+  loadCodexNativeModels,
+  resolveCodexNativeBase,
+} from './runtime/codex.js';
 import { startRouter } from './router.js';
 import { detectOrphanedV1Signatures, detectV1State, migrateV1 } from './migrate.js';
 
@@ -497,7 +501,7 @@ async function runTool(tool, args) {
   }
   const kenariBase = tool === 'codex' ? `${gatewayBase()}/v1` : gatewayBase();
   const nativeBase = tool === 'codex'
-    ? (process.env.KENARI_CODEX_NATIVE_BASE_URL || 'https://api.openai.com/v1')
+    ? resolveCodexNativeBase(binary, process.env)
     : (process.env.KENARI_CLAUDE_NATIVE_BASE_URL || 'https://api.anthropic.com');
   const runtimeBuilder = tool === 'codex' ? buildCodexLaunch : buildClaudeLaunch;
   try {

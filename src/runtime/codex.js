@@ -1,8 +1,27 @@
 import { spawnSync } from 'node:child_process';
 import { KenariError } from '../store.js';
 
+export const CODEX_CHATGPT_BASE_URL = 'https://chatgpt.com/backend-api/codex';
+export const CODEX_API_BASE_URL = 'https://api.openai.com/v1';
+const CODEX_ROUTER_PROVIDER = 'kenari_router';
+
 function tomlString(value) {
   return JSON.stringify(value);
+}
+
+export function resolveCodexNativeBase(binary, env = process.env, run = spawnSync) {
+  if (env.KENARI_CODEX_NATIVE_BASE_URL) return env.KENARI_CODEX_NATIVE_BASE_URL;
+  const result = run(binary, ['login', 'status'], {
+    encoding: 'utf8',
+    env,
+    timeout: 5000,
+    windowsHide: true,
+  });
+  const output = `${result.stdout || ''}\n${result.stderr || ''}`;
+  if (/logged in using chatgpt/i.test(output)) return CODEX_CHATGPT_BASE_URL;
+  if (/logged in using (?:an )?api key/i.test(output)) return CODEX_API_BASE_URL;
+  if (env.OPENAI_API_KEY?.trim()) return CODEX_API_BASE_URL;
+  throw new KenariError('cannot determine Codex login method. Run: codex login');
 }
 
 export function loadCodexNativeModels(binary, env = process.env) {
@@ -73,8 +92,13 @@ export function buildCodexLaunch(options) {
     if (inline === null) index += 1;
   }
   const overrides = [
-    'model_provider="openai"',
-    `openai_base_url=${tomlString(options.routerUrl)}`,
+    `model_provider="${CODEX_ROUTER_PROVIDER}"`,
+    `model_providers.${CODEX_ROUTER_PROVIDER}.name="OpenAI"`,
+    `model_providers.${CODEX_ROUTER_PROVIDER}.base_url=${tomlString(options.routerUrl)}`,
+    `model_providers.${CODEX_ROUTER_PROVIDER}.wire_api="responses"`,
+    `model_providers.${CODEX_ROUTER_PROVIDER}.requires_openai_auth=true`,
+    `model_providers.${CODEX_ROUTER_PROVIDER}.supports_websockets=false`,
+    `model_providers.${CODEX_ROUTER_PROVIDER}.supports_standalone_web_search=true`,
   ];
   if (options.catalogPath) {
     overrides.push(`model_catalog_json=${tomlString(options.catalogPath)}`);
