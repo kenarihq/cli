@@ -75,6 +75,16 @@ export function codexKenariModels(cache, nativeModels = []) {
 export function buildCodexLaunch(options) {
   const inputArgs = options.args || [];
   for (let index = 0; index < inputArgs.length; index += 1) {
+    if (inputArgs[index] === '--enable') {
+      if (inputArgs[index + 1] === 'enable_request_compression') {
+        throw new KenariError('unsafe Codex routing override: enable_request_compression');
+      }
+      index += 1;
+      continue;
+    }
+    if (inputArgs[index] === '--enable=enable_request_compression') {
+      throw new KenariError('unsafe Codex routing override: enable_request_compression');
+    }
     if (inputArgs[index] === '--oss' || inputArgs[index] === '--local-provider'
       || inputArgs[index].startsWith('--local-provider=')) {
       throw new KenariError(`unsafe Codex routing override: ${inputArgs[index]}`);
@@ -85,7 +95,12 @@ export function buildCodexLaunch(options) {
     if (inline === null && !['-c', '--config'].includes(inputArgs[index])) continue;
     const value = inline ?? inputArgs[index + 1] ?? '';
     const key = value.split('=', 1)[0].trim();
-    if (['model_provider', 'openai_base_url', 'model_catalog_json'].includes(key)
+    if ([
+      'model_provider',
+      'openai_base_url',
+      'model_catalog_json',
+      'features.enable_request_compression',
+    ].includes(key)
       || key.startsWith('model_providers.')) {
       throw new KenariError(`unsafe Codex routing override: ${key}`);
     }
@@ -99,6 +114,7 @@ export function buildCodexLaunch(options) {
     `model_providers.${CODEX_ROUTER_PROVIDER}.requires_openai_auth=true`,
     `model_providers.${CODEX_ROUTER_PROVIDER}.supports_websockets=false`,
     `model_providers.${CODEX_ROUTER_PROVIDER}.supports_standalone_web_search=true`,
+    'features.enable_request_compression=false',
   ];
   if (options.catalogPath) {
     overrides.push(`model_catalog_json=${tomlString(options.catalogPath)}`);
