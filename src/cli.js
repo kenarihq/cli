@@ -1,27 +1,57 @@
+import fs from 'node:fs';
 import os from 'node:os';
+import path from 'node:path';
+import { randomBytes } from 'node:crypto';
 import { spawn } from 'node:child_process';
 import registry from './adapters/registry.js';
-import { KenariError, getKey, setKey, deleteKey, maskKey, withLock } from './store.js';
-import { fetchModels, formatRp, AuthError } from './gateway.js';
-import { askHidden, ask, pickNumber } from './prompt.js';
-import { gatewayBase } from './paths.js';
+import {
+  KenariError,
+  deleteKey,
+  getKey,
+  loadState,
+  maskKey,
+  removeFile,
+  setKey,
+  withLock,
+} from './store.js';
+import {
+  ROLE_DEFINITIONS,
+  getToolConfig,
+  hasKenariRoutes,
+  loadConfig,
+  saveConfig,
+} from './config.js';
+import {
+  loadCatalogCache,
+  loadCatalogForLaunch,
+  writeMergedCodexCatalog,
+} from './catalog.js';
+import { fetchCatalog, formatRp } from './gateway.js';
+import { ask, askHidden, askYesNo, pickNumber } from './prompt.js';
+import { gatewayBase, modelCachePath, runtimeDir } from './paths.js';
 import { genPkce, genState, buildLoopbackUrl, buildPasteUrl, startCallbackServer } from './oauth.js';
+import { resolveBinary, runWrappedTool } from './supervisor.js';
+import { buildClaudeLaunch } from './runtime/claude.js';
+import { buildCodexLaunch, loadCodexNativeModels } from './runtime/codex.js';
+import { startRouter } from './router.js';
+import { detectOrphanedV1Signatures, detectV1State, migrateV1 } from './migrate.js';
 
 const isTTY = () => Boolean(process.stdin.isTTY && process.stdout.isTTY);
+const TOOLS = Object.keys(ROLE_DEFINITIONS);
 
 function parseFlags(argv) {
-  const flags = {}; const rest = [];
+  const flags = {};
+  const rest = [];
   for (let i = 0; i < argv.length; i += 1) {
-    if (argv[i].startsWith('--')) {
-      // A flag value never starts with `--`: that is the next flag, not this
-      // one's value (otherwise two adjacent boolean flags, e.g. `--paste
-      // --no-browser`, would swallow each other).
+    const arg = argv[i];
+    if (arg.startsWith('--')) {
       const next = argv[i + 1];
       const hasValue = next !== undefined && !next.startsWith('--');
-      flags[argv[i].slice(2)] = hasValue ? next : true;
+      flags[arg.slice(2)] = hasValue ? next : true;
       if (hasValue) i += 1;
+    } else {
+      rest.push(arg);
     }
-    else rest.push(argv[i]);
   }
   return { flags, rest };
 }
@@ -33,168 +63,461 @@ async function readStdinLine() {
 }
 
 function findAdapter(id) {
-  return registry.find((a) => a.id === id) || null;
+  return registry.find((adapter) => adapter.id === id) || null;
 }
 
-function printStatus() {
-  for (const a of registry) {
-    const det = a.detect();
-    if (!det.installed) { console.log(`${a.id.padEnd(8)} not found`); continue; }
-    const st = a.status();
-    if (st.provider === 'kenari') {
-      const map = Object.entries(st.mapping || {}).map(([k, v]) => `${k}=${v}`).join(' ');
-      console.log(`${a.id.padEnd(8)} kenari   ${map}`);
-    } else {
-      console.log(`${a.id.padEnd(8)} default`);
-    }
-    for (const n of st.notes) console.log(`         note: ${n}`);
+function assertTool(tool) {
+  if (!TOOLS.includes(tool)) {
+    throw new KenariError(`unknown tool "${tool}". Known tools: ${TOOLS.join(', ')}`);
   }
 }
 
-async function ensureKey() {
-  const key = getKey();
-  if (key) return key;
-  if (!isTTY()) throw new KenariError('no API key stored. Run: kenari login');
-  const entered = await askHidden('kenari API key (kn-..., from https://kenari.id/keys): ');
-  setKey(entered);
-  return entered;
+function defaultRoles(tool) {
+  const roles = {};
+  for (const role of Object.keys(ROLE_DEFINITIONS[tool])) {
+    roles[role] = { mode: tool === 'codex' && role !== 'main' ? 'inherit' : 'native' };
+  }
+  return roles;
 }
 
-async function buildMapping(adapter, key, flags) {
-  // Validate any flag-provided slot value up front. A bare `--opus` (no value)
-  // parses as boolean true; it must fail with a clear message naming the slot
-  // instead of slipping through as a bogus model id or an unvalidated offline
-  // value.
-  for (const slot of adapter.slots) {
-    if (flags[slot.id] !== undefined) {
-      const chosen = flags[slot.id];
-      if (!(typeof chosen === 'string' && chosen.length > 0 && !chosen.startsWith('--'))) {
-        throw new KenariError(`--${slot.id} needs a model id (e.g. --${slot.id} glm-5-2)`);
-      }
-    }
+function parseRoleValue(tool, role, value) {
+  if (typeof value !== 'string' || value === '') {
+    throw new KenariError(`--${role} needs native, inherit, picker, or kenari/<model-id>`);
   }
-  let catalog = null;
-  try { catalog = await fetchModels(key); }
-  catch (e) {
-    if (e instanceof AuthError) throw e;
-    const allProvided = adapter.slots.every((s) => flags[s.id]);
-    if (!allProvided) throw new KenariError(e.message + '. To apply without validation, pass every slot flag explicitly.');
-    console.log('warning: cannot reach gateway, applying without validation');
+  if (value.startsWith('kenari/')) return { mode: 'fixed', model: value };
+  if (!ROLE_DEFINITIONS[tool][role].includes(value)) {
+    throw new KenariError(`unsupported ${tool}.${role} value "${value}"`);
   }
-  if (catalog && catalog.length === 0) {
-    throw new KenariError('the kenari catalog returned no models; try again later');
-  }
-  const ids = catalog ? new Set(catalog.map((m) => m.id)) : null;
-  const mapping = {};
-  for (const slot of adapter.slots) {
-    let chosen = flags[slot.id];
-    if (chosen && ids && !ids.has(chosen)) {
-      throw new KenariError(`model "${chosen}" is not in the kenari catalog. Run: kenari models`);
-    }
-    if (!chosen) {
-      if (isTTY()) {
-        const items = catalog.map((m) => `${m.id.padEnd(24)} in ${formatRp(m.in)}/1M  out ${formatRp(m.out)}/1M  ctx ${m.context ?? '-'}`);
-        let defIdx = catalog.findIndex((m) => m.id === slot.defaultModel);
-        if (defIdx === -1) defIdx = 0;
-        const idx = await pickNumber(`${adapter.name}: ${slot.label}`, items, defIdx);
-        chosen = catalog[idx].id;
-      } else {
-        chosen = slot.defaultModel;
-        if (ids && !ids.has(chosen)) {
-          throw new KenariError(`default model "${chosen}" is not in the catalog; pass --${slot.id} explicitly`);
-        }
-      }
-    }
-    mapping[slot.id] = chosen;
-  }
-  return mapping;
+  return { mode: value };
 }
 
-async function cmdUse(argv) {
-  const { flags, rest } = parseFlags(argv);
-  const toolId = rest[0];
-  if (!toolId) throw new KenariError('usage: kenari use <claude|codex> [default]');
-  const adapter = findAdapter(toolId);
-  if (!adapter) {
-    throw new KenariError(`unknown tool "${toolId}". Known tools: ${registry.map((a) => a.id).join(', ')}`);
-  }
-  const det = adapter.detect();
-  if (!det.installed) {
-    throw new KenariError(`${adapter.id} not found (looked for ${det.configPath})`);
-  }
-
-  if (rest[1] === 'default') {
-    const { restored, conflicts } = await withLock(() => adapter.restore());
-    if (!restored) { console.log(`${adapter.id} is not switched (nothing to restore)`); return 0; }
-    if (conflicts.length === 0) {
-      console.log(`ok: ${adapter.id} restored to its previous default`);
-      return 0;
-    }
-    console.log(`${adapter.id}: restored with conflicts:`);
-    for (const c of conflicts) console.log(`  ${c}`);
-    return 1;
-  }
-
-  const key = await ensureKey();
-  const mapping = await buildMapping(adapter, key, flags);
-  await withLock(() => adapter.apply(mapping, key));
-  const mapStr = Object.entries(mapping).map(([k, v]) => `${k}=${v}`).join(' ');
-  console.log(`ok: ${adapter.id} -> kenari (${mapStr})`);
-  if (adapter.id === 'claude') {
-    console.log('in-app /model now moves between your mapped kenari models');
-  }
-  return 0;
+function fixedIds(roles) {
+  return Object.values(roles)
+    .filter((role) => role.mode === 'fixed')
+    .map((role) => role.model.slice('kenari/'.length));
 }
 
-async function cmdModels() {
-  const key = await ensureKey();
-  const models = await fetchModels(key);
-  console.log(`${'id'.padEnd(24)} ${'in /1M'.padStart(12)} ${'out /1M'.padStart(12)} ${'ctx'.padStart(10)}`);
-  for (const m of models) {
-    console.log(
-      `${m.id.padEnd(24)} ${formatRp(m.in).padStart(12)} ${formatRp(m.out).padStart(12)} ${String(m.context ?? '-').padStart(10)}`,
+function storedMigrationConflicts(tool) {
+  const state = loadState();
+  if (state.version === 1) {
+    return (state.migration_conflicts || []).filter((item) => !tool || item.tool === tool);
+  }
+  return Object.entries(state.migration?.tools || {})
+    .filter(([id, value]) => (!tool || id === tool) && value?.status === 'conflict')
+    .flatMap(([id, value]) => (value.keys || []).map((key) => ({ tool: id, key })));
+}
+
+async function prepareMigration(tool) {
+  if (detectV1State()) {
+    const result = await withLock(() => migrateV1());
+    const conflicts = result.conflicts.filter((item) => !tool || item.tool === tool);
+    if (conflicts.length) {
+      throw new KenariError(
+        `migration conflict: ${conflicts.map((item) => `${item.tool}.${item.key}`).join(', ')}`,
+      );
+    }
+    if (result.migrated.length) {
+      console.error(`migrated version 1 routing: ${result.migrated.join(', ')}`);
+    }
+  }
+  const orphaned = detectOrphanedV1Signatures().filter((item) => !tool || item.tool === tool);
+  if (orphaned.length) {
+    throw new KenariError(
+      `unowned version 1 routing found: ${orphaned.map((item) => `${item.tool}.${item.key}`).join(', ')}`,
     );
   }
+  const conflicts = storedMigrationConflicts(tool);
+  if (conflicts.length) {
+    throw new KenariError(
+      `migration conflict: ${conflicts.map((item) => `${item.tool}.${item.key}`).join(', ')}`,
+    );
+  }
+}
+
+async function catalogForRoles(roles) {
+  const needsCatalog = fixedIds(roles).length > 0
+    || Object.values(roles).some((role) => role.mode === 'picker');
+  if (!needsCatalog) return null;
+  const key = getKey();
+  if (!key) throw new KenariError('Kenari login required. Run: kenari login');
+  const result = await loadCatalogForLaunch({ key, requireKenari: true });
+  if (result.warning) console.log(`warning: ${result.warning}`);
+  const ids = new Set(result.cache.models.map((model) => model.id));
+  for (const id of fixedIds(roles)) {
+    if (!ids.has(id)) {
+      throw new KenariError(`model "kenari/${id}" is not in the Kenari catalog. Run: kenari models`);
+    }
+  }
+  return result.cache;
+}
+
+async function pickFixedModel(tool, role, current) {
+  const key = getKey();
+  if (!key) throw new KenariError('Kenari login required. Run: kenari login');
+  const { cache, warning } = await loadCatalogForLaunch({ key, requireKenari: true });
+  if (warning) console.log(`warning: ${warning}`);
+  if (!cache.models.length) throw new KenariError('the Kenari catalog returned no models');
+  const items = cache.models.map((model) => (
+    `kenari/${model.id}  ${formatRp(model.input_price)} in  `
+    + `${formatRp(model.output_price)} out  ${model.context_limit ?? '-'} context`
+  ));
+  const currentId = current?.mode === 'fixed' ? current.model : '';
+  let defaultIndex = cache.models.findIndex((model) => `kenari/${model.id}` === currentId);
+  if (defaultIndex < 0) defaultIndex = 0;
+  const selected = await pickNumber(`${tool}: ${role}`, items, defaultIndex);
+  return { mode: 'fixed', model: `kenari/${cache.models[selected].id}` };
+}
+
+async function configureAdvanced(tool, current) {
+  const roles = {};
+  for (const [role, modes] of Object.entries(ROLE_DEFINITIONS[tool])) {
+    const labels = modes.map((mode) => mode === 'fixed' ? 'fixed Kenari model' : mode);
+    const previous = current?.[role]?.mode;
+    let defaultIndex = modes.indexOf(previous);
+    if (defaultIndex < 0) defaultIndex = 0;
+    const index = await pickNumber(`${tool}: ${role}`, labels, defaultIndex);
+    const mode = modes[index];
+    roles[role] = mode === 'fixed'
+      ? await pickFixedModel(tool, role, current?.[role])
+      : { mode };
+  }
+  return roles;
+}
+
+async function configureClaude(current) {
+  const roleIds = Object.keys(ROLE_DEFINITIONS.claude);
+  const prior = roleIds.filter((role) => current?.[role]?.mode === 'fixed');
+  const answer = await ask(
+    `Claude roles to use Kenari (${roleIds.join(', ')})`
+    + ` [Enter = ${prior.length ? prior.join(',') : 'none'}]: `,
+  );
+  const selected = answer === ''
+    ? prior
+    : answer.toLowerCase() === 'none'
+      ? []
+      : answer.split(',').map((value) => value.trim()).filter(Boolean);
+  const unknown = selected.filter((role) => !roleIds.includes(role));
+  if (unknown.length) throw new KenariError(`unknown Claude role "${unknown[0]}"`);
+  const roles = defaultRoles('claude');
+  for (const role of selected) roles[role] = await pickFixedModel('claude', role, current?.[role]);
+  return roles;
+}
+
+async function configureCodex(current) {
+  const roles = defaultRoles('codex');
+  const modes = ['native', 'picker', 'fixed'];
+  let defaultIndex = modes.indexOf(current?.main?.mode);
+  if (defaultIndex < 0) defaultIndex = 1;
+  const selected = modes[await pickNumber(
+    'Codex: add Kenari models to the active model selection?',
+    ['native only', 'native and Kenari picker', 'fixed Kenari model'],
+    defaultIndex,
+  )];
+  roles.main = selected === 'fixed'
+    ? await pickFixedModel('codex', 'main', current?.main)
+    : { mode: selected };
+  if (await askYesNo('Configure review and subagent roles independently?', false)) {
+    return configureAdvanced('codex', { ...current, main: roles.main });
+  }
+  return roles;
+}
+
+function printRoutingSummary(tool, roles) {
+  console.log(tool === 'claude' ? 'Claude Code' : 'Codex');
+  for (const [role, value] of Object.entries(roles)) {
+    const target = value.mode === 'fixed' ? value.model : value.mode;
+    console.log(`  ${role.padEnd(12)} ${target}`);
+  }
+}
+
+async function cmdConfigure(argv) {
+  const { flags, rest } = parseFlags(argv);
+  const requested = rest[0];
+  if (requested) assertTool(requested);
+  const tools = requested
+    ? [requested]
+    : registry.filter((adapter) => {
+      try {
+        resolveBinary(adapter.id, { exclude: [process.argv[1]] });
+        return true;
+      } catch {
+        return adapter.detect().installed;
+      }
+    }).map((adapter) => adapter.id);
+  if (!tools.length) throw new KenariError('no supported tools installed (looked for Claude Code and Codex)');
+
+  for (const tool of tools) await prepareMigration(tool);
+  let config = loadConfig() || { version: 2, tools: {} };
+  for (const tool of tools) {
+    const current = getToolConfig(config, tool)?.roles || null;
+    let roles;
+    if (flags.yes) {
+      const roleIds = Object.keys(ROLE_DEFINITIONS[tool]);
+      const missing = roleIds.filter((role) => !(role in flags));
+      if (missing.length) {
+        throw new KenariError(`--yes requires every ${tool} role; missing --${missing.join(', --')}`);
+      }
+      roles = {};
+      for (const role of roleIds) roles[role] = parseRoleValue(tool, role, flags[role]);
+    } else {
+      if (!isTTY()) throw new KenariError('non-interactive configuration requires --yes and every role');
+      const advanced = await askYesNo(`Use advanced ${tool} role configuration?`, false);
+      roles = advanced
+        ? await configureAdvanced(tool, current)
+        : tool === 'claude'
+          ? await configureClaude(current)
+          : await configureCodex(current);
+    }
+    await catalogForRoles(roles);
+    config = {
+      version: 2,
+      tools: { ...config.tools, [tool]: { roles } },
+    };
+    printRoutingSummary(tool, roles);
+  }
+  await withLock(() => saveConfig(config));
+  console.log('ok: routing configuration saved');
   return 0;
 }
 
-async function cmdKey(argv) {
-  const { flags, rest } = parseFlags(argv);
-  const sub = rest[0] || 'show';
-  if (sub === 'show') {
-    const key = getKey();
-    if (!key) { console.log('no key stored. Run: kenari key set'); return 0; }
-    console.log(maskKey(key));
+async function cmdReset(argv) {
+  const { rest } = parseFlags(argv);
+  const requested = rest[0];
+  if (requested) assertTool(requested);
+  if (requested) await prepareMigration(requested);
+  else if (detectV1State()) await prepareMigration();
+  const config = loadConfig();
+  if (!config) {
+    console.log('nothing to reset');
     return 0;
   }
-  if (sub === 'delete') {
-    deleteKey();
-    console.log('deleted the stored API key');
-    return 0;
+  const tools = requested ? [requested] : Object.keys(config.tools);
+  const next = { version: 2, tools: { ...config.tools } };
+  for (const tool of tools) delete next.tools[tool];
+  await withLock(() => saveConfig(next));
+  if (!hasKenariRoutes(next)) removeFile(modelCachePath());
+  console.log(`ok: reset ${tools.length ? tools.join(', ') : 'routing configuration'}`);
+  return 0;
+}
+
+function cacheAge(cache) {
+  if (!cache) return null;
+  return Math.max(0, Date.now() - Date.parse(cache.fetched_at));
+}
+
+function offlineStatus() {
+  const config = loadConfig();
+  const cache = loadCatalogCache();
+  const tools = {};
+  for (const tool of TOOLS) {
+    const configured = config?.tools?.[tool];
+    tools[tool] = configured
+      ? Object.fromEntries(Object.entries(configured.roles).map(([role, value]) => [
+        role,
+        value.mode === 'fixed' ? value.model : value.mode,
+      ]))
+      : null;
   }
-  if (sub === 'set') {
-    let key;
-    if (flags.stdin) key = await readStdinLine();
-    else if (isTTY()) key = await askHidden('kenari API key (kn-...): ');
-    else throw new KenariError('provide the key via --stdin');
-    setKey(key);
-    for (const a of registry) {
-      if (!a.detect().installed) continue;
-      const st = a.status();
-      if (st.provider === 'kenari') {
-        const vals = Object.values(st.mapping || {});
-        if (vals.length === 0 || vals.some((v) => v === null || v === undefined || v === '')) {
-          console.log(`warning: skipped re-applying to ${a.id} (its mapping is missing a model; run: kenari use ${a.id})`);
-          continue;
-        }
-        await withLock(() => a.apply(st.mapping, key));
-        console.log(`re-applied to ${a.id}`);
-      }
+  return {
+    version: 2,
+    credential: getKey() ? 'stored' : 'missing',
+    cache: cache ? {
+      age_ms: cacheAge(cache),
+      fetched_at: cache.fetched_at,
+      gateway: cache.gateway,
+      models: cache.models.length,
+    } : null,
+    migration_conflicts: [...storedMigrationConflicts(), ...detectOrphanedV1Signatures()],
+    tools,
+  };
+}
+
+async function boundedReachable(url, timeoutMs = 3000) {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
+  try {
+    const response = await fetch(url, { method: 'HEAD', signal: controller.signal });
+    return { ok: response.status < 500, status: response.status };
+  } catch (error) {
+    return { ok: false, error: error.name === 'AbortError' ? 'timeout' : error.message };
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+async function runStatusChecks(status) {
+  const checks = {};
+  let router;
+  try {
+    router = await startRouter({
+      nativeBase: 'https://127.0.0.1:9',
+      kenariBase: 'https://127.0.0.1:9',
+      credential: null,
+      catalog: null,
+    });
+    checks.router = { ok: true };
+  } catch (error) {
+    checks.router = { ok: false, error: error.message };
+  } finally {
+    await router?.close();
+  }
+  checks.native_anthropic = await boundedReachable('https://api.anthropic.com');
+  checks.native_openai = await boundedReachable('https://api.openai.com');
+  const key = getKey();
+  if (!key) {
+    checks.kenari = { ok: false, error: 'login required' };
+    checks.catalog = { ok: false, error: 'login required' };
+  } else {
+    try {
+      const body = await fetchCatalog(key);
+      checks.kenari = { ok: true };
+      checks.catalog = { ok: Array.isArray(body.data), models: body.data?.length ?? 0 };
+    } catch (error) {
+      checks.kenari = { ok: false, error: error.message };
+      checks.catalog = { ok: false, error: error.message };
     }
-    console.log(`stored the API key (${maskKey(key)})`);
+  }
+  return { ...status, checks };
+}
+
+async function cmdStatus(argv) {
+  const { flags, rest } = parseFlags(argv);
+  if (rest.length) throw new KenariError('usage: kenari status [--check] [--json]');
+  let status = offlineStatus();
+  if (flags.check) status = await runStatusChecks(status);
+  if (flags.json) {
+    console.log(JSON.stringify(status, null, 2));
+    return Object.values(status.checks || {}).some((check) => !check.ok) ? 1 : 0;
+  }
+  console.log(`credential  ${status.credential}`);
+  console.log(`catalog     ${status.cache ? `${status.cache.models} models, age ${Math.round(status.cache.age_ms / 1000)}s` : 'missing'}`);
+  for (const conflict of status.migration_conflicts) {
+    console.log(`conflict    ${conflict.tool}.${conflict.key}`);
+  }
+  for (const [tool, roles] of Object.entries(status.tools)) {
+    console.log(`${tool.padEnd(11)}${roles ? 'configured' : 'not configured'}`);
+    for (const [role, target] of Object.entries(roles || {})) {
+      console.log(`  ${role.padEnd(12)} ${target}`);
+    }
+  }
+  for (const [name, check] of Object.entries(status.checks || {})) {
+    console.log(`check ${name.padEnd(17)} ${check.ok ? 'ok' : `failed: ${check.error || check.status}`}`);
+  }
+  return Object.values(status.checks || {}).some((check) => !check.ok) ? 1 : 0;
+}
+
+async function cmdModels(argv) {
+  const { flags, rest } = parseFlags(argv);
+  if (rest.length) throw new KenariError('usage: kenari models [--json]');
+  let cache = null;
+  const key = getKey();
+  if (key) {
+    const result = await loadCatalogForLaunch({
+      key,
+      requireKenari: true,
+      maxAgeMs: 0,
+    });
+    cache = result.cache;
+    if (result.warning) console.log(`warning: ${result.warning}`);
+  } else {
+    cache = (await loadCatalogForLaunch({ refresh: false, requireKenari: false })).cache;
+  }
+  if (!cache) throw new KenariError('no model catalog cached. Run: kenari login, then kenari configure');
+  const output = {
+    fetched_at: cache.fetched_at,
+    age_ms: cacheAge(cache),
+    models: cache.models.map((model) => ({
+      id: `kenari/${model.id}`,
+      input_price: model.input_price,
+      output_price: model.output_price,
+      context_limit: model.context_limit,
+      output_limit: model.output_limit,
+      reasoning_efforts: model.reasoning_efforts,
+    })),
+  };
+  if (flags.json) {
+    console.log(JSON.stringify(output, null, 2));
     return 0;
   }
-  throw new KenariError(`unknown key command "${sub}". Use: set, show, delete`);
+  console.log(`${'id'.padEnd(30)} ${'in /1M'.padStart(12)} ${'out /1M'.padStart(12)} ${'context'.padStart(10)} ${'output'.padStart(10)}`);
+  for (const model of output.models) {
+    console.log(
+      `${model.id.padEnd(30)} ${formatRp(model.input_price).padStart(12)} `
+      + `${formatRp(model.output_price).padStart(12)} `
+      + `${String(model.context_limit ?? '-').padStart(10)} `
+      + `${String(model.output_limit ?? '-').padStart(10)}`,
+    );
+  }
+  console.log(`cache age: ${Math.round(output.age_ms / 1000)}s`);
+  return 0;
+}
+
+function originalBinary(tool) {
+  return resolveBinary(tool, { exclude: [process.argv[1]] });
+}
+
+function assertSelectedModels(toolConfig, cache) {
+  const available = new Set((cache?.models || []).map((model) => model.id));
+  for (const id of fixedIds(toolConfig.roles)) {
+    if (!available.has(id)) {
+      throw new KenariError(`selected model "kenari/${id}" is unavailable. Run: kenari configure`);
+    }
+  }
+}
+
+async function ensureConfigured(tool) {
+  await prepareMigration(tool);
+  let config = loadConfig();
+  if (!getToolConfig(config, tool)) {
+    if (!isTTY()) throw new KenariError(`missing ${tool} configuration, run: kenari configure ${tool}`);
+    await cmdConfigure([tool]);
+    config = loadConfig();
+  }
+  return { config, toolConfig: getToolConfig(config, tool) };
+}
+
+async function runTool(tool, args) {
+  const { config, toolConfig } = await ensureConfigured(tool);
+  const requireKenari = hasKenariRoutes(config, tool);
+  const key = getKey();
+  if (requireKenari && !key) throw new KenariError('Kenari login required. Run: kenari login');
+  const { cache, warning } = await loadCatalogForLaunch({
+    key,
+    requireKenari,
+  });
+  if (warning) console.error(`warning: ${warning}`);
+  if (requireKenari) assertSelectedModels(toolConfig, cache);
+
+  const binary = originalBinary(tool);
+  let catalogPath = null;
+  if (tool === 'codex' && cache) {
+    fs.mkdirSync(runtimeDir(), { recursive: true, mode: 0o700 });
+    catalogPath = path.join(runtimeDir(), `models-${process.pid}-${randomBytes(6).toString('hex')}.json`);
+    writeMergedCodexCatalog(loadCodexNativeModels(binary), cache, catalogPath);
+  }
+  const kenariBase = tool === 'codex' ? `${gatewayBase()}/v1` : gatewayBase();
+  const nativeBase = tool === 'codex'
+    ? (process.env.KENARI_CODEX_NATIVE_BASE_URL || 'https://api.openai.com/v1')
+    : (process.env.KENARI_CLAUDE_NATIVE_BASE_URL || 'https://api.anthropic.com');
+  const runtimeBuilder = tool === 'codex' ? buildCodexLaunch : buildClaudeLaunch;
+  try {
+    return await runWrappedTool({
+      binary,
+      args,
+      env: process.env,
+      routerOptions: {
+        nativeBase,
+        kenariBase,
+        credential: key,
+        catalog: cache,
+        capabilityToken: tool === 'claude' ? randomBytes(32).toString('base64url') : null,
+      },
+      runtimeBuilder,
+      runtimeOptions: { toolConfig, catalogPath },
+    });
+  } finally {
+    if (catalogPath) removeFile(catalogPath);
+  }
 }
 
 const LOGIN_TIMEOUT_MS = 5 * 60 * 1000;
@@ -207,7 +530,7 @@ function openBrowser(url) {
     if (process.platform === 'darwin') child = spawn('open', [url], { detached: true, stdio: 'ignore' });
     else if (process.platform === 'win32') child = spawn('cmd', ['/c', 'start', '', url], { detached: true, stdio: 'ignore', windowsHide: true });
     else child = spawn('xdg-open', [url], { detached: true, stdio: 'ignore' });
-    child.on('error', () => {}); // no browser available: the URL is already printed
+    child.on('error', () => {});
     child.unref();
   } catch {}
 }
@@ -219,59 +542,53 @@ function printLoginUrl(url, flags) {
 }
 
 async function exchangeCode(base, code, verifier) {
-  let res;
+  let response;
   try {
-    res = await fetch(base + '/api/cli-auth/token', {
+    response = await fetch(base + '/api/cli-auth/token', {
       method: 'POST',
       headers: { 'content-type': 'application/json' },
       body: JSON.stringify({ code, verifier }),
     });
-  } catch (e) {
-    throw new KenariError(`cannot reach ${base}: ${e.cause?.code || e.message}`);
+  } catch (error) {
+    throw new KenariError(`cannot reach ${base}: ${error.cause?.code || error.message}`);
   }
-  if (!res.ok) {
-    const msg = (await res.text()).trim();
-    throw new KenariError(msg || `login failed (HTTP ${res.status})`);
+  if (!response.ok) {
+    const message = (await response.text()).trim();
+    throw new KenariError(message || `login failed (HTTP ${response.status})`);
   }
-  return res.json();
+  return response.json();
 }
 
 async function finishLogin(base, code, verifier) {
-  let resp;
   try {
-    resp = await exchangeCode(base, code, verifier);
-  } catch (e) {
-    if (e instanceof KenariError) {
-      console.error(`error: ${e.message}`);
-      console.error('Retry with: kenari login');
-      return 1;
-    }
-    throw e;
+    const response = await exchangeCode(base, code, verifier);
+    setKey(response.key);
+    console.log(`ok: signed in as ${response.prefix || maskKey(response.key)}`);
+    return 0;
+  } catch (error) {
+    if (!(error instanceof KenariError)) throw error;
+    console.error(`error: ${error.message}`);
+    console.error('Retry with: kenari login');
+    return 1;
   }
-  setKey(resp.key);
-  console.log(`ok: signed in as ${resp.prefix || maskKey(resp.key)}`);
-  return 0;
 }
 
 async function loginLoopback(base, host, flags) {
   const { verifier, challenge } = genPkce();
   const state = genState();
   const { server, port, codePromise } = await startCallbackServer(state);
-
-  const url = buildLoopbackUrl(base, { challenge, state, port, host });
-  printLoginUrl(url, flags);
-
+  printLoginUrl(buildLoopbackUrl(base, { challenge, state, port, host }), flags);
   let timer;
-  let sigintHandler;
+  let signalHandler;
   try {
-    const timeoutPromise = new Promise((resolve) => {
+    const timeout = new Promise((resolve) => {
       timer = setTimeout(() => resolve(LOGIN_TIMEOUT), LOGIN_TIMEOUT_MS);
     });
-    const interruptPromise = new Promise((resolve) => {
-      sigintHandler = () => resolve(LOGIN_INTERRUPT);
-      process.once('SIGINT', sigintHandler);
+    const interrupt = new Promise((resolve) => {
+      signalHandler = () => resolve(LOGIN_INTERRUPT);
+      process.once('SIGINT', signalHandler);
     });
-    const result = await Promise.race([codePromise, timeoutPromise, interruptPromise]);
+    const result = await Promise.race([codePromise, timeout, interrupt]);
     if (result === LOGIN_TIMEOUT) {
       console.error('login timed out, run `kenari login` again');
       return 1;
@@ -280,75 +597,84 @@ async function loginLoopback(base, host, flags) {
       console.error('login cancelled');
       return 1;
     }
-    return await finishLogin(base, result, verifier);
+    return finishLogin(base, result, verifier);
   } finally {
     clearTimeout(timer);
-    if (sigintHandler) process.off('SIGINT', sigintHandler);
+    if (signalHandler) process.off('SIGINT', signalHandler);
     server.close();
   }
 }
 
 async function loginPaste(base, host, flags) {
   const { verifier, challenge } = genPkce();
-  const url = buildPasteUrl(base, { challenge, host });
-  printLoginUrl(url, flags);
-  if (!isTTY()) throw new KenariError('paste mode needs an interactive terminal to enter the code');
+  printLoginUrl(buildPasteUrl(base, { challenge, host }), flags);
+  if (!isTTY()) throw new KenariError('paste mode needs an interactive terminal');
   const code = await ask('Paste the code shown in your browser: ');
-  if (!code) { console.error('error: no code entered'); return 1; }
-  return await finishLogin(base, code, verifier);
+  if (!code) throw new KenariError('no code entered');
+  return finishLogin(base, code, verifier);
 }
 
 async function cmdLogin(argv) {
-  const { flags } = parseFlags(argv);
-  const base = (typeof flags.base === 'string' && flags.base) || gatewayBase();
-  const host = os.hostname();
-  if (flags.paste) return await loginPaste(base, host, flags);
-  return await loginLoopback(base, host, flags);
-}
-
-async function interactive() {
-  printStatus();
-  const installed = registry.filter((a) => a.detect().installed);
-  if (installed.length === 0) {
-    console.log('no supported tools installed (looked for Claude Code, Codex).');
+  const { flags, rest } = parseFlags(argv);
+  if (rest.length) throw new KenariError('usage: kenari login [--no-browser] [--paste] [--stdin]');
+  if (flags.stdin) {
+    const key = await readStdinLine();
+    setKey(key);
+    console.log(`ok: stored ${maskKey(key)}`);
     return 0;
   }
-  const items = [...installed.map((a) => a.name), 'quit'];
-  const pick = await pickNumber('switch which tool?', items, 0);
-  if (pick === installed.length) return 0;
-  const adapter = installed[pick];
-  const target = await pickNumber('target?', ['kenari', 'default (restore)'], 0);
-  if (target === 1) return await cmdUse([adapter.id, 'default']);
-  return await cmdUse([adapter.id]);
+  const base = typeof flags.base === 'string' && flags.base ? flags.base : gatewayBase();
+  const host = os.hostname();
+  return flags.paste ? loginPaste(base, host, flags) : loginLoopback(base, host, flags);
+}
+
+async function cmdLogout() {
+  deleteKey();
+  console.log('ok: logged out');
+  return 0;
 }
 
 const USAGE = `kenari CLI
 
 usage:
-  kenari                 interactive switcher
-  kenari login [--no-browser] [--paste]  sign in and store an API key
-  kenari use <tool> [default] [--opus M --sonnet M --haiku M | --model M]
-  kenari status          show what each tool points at
-  kenari models          list kenari models with prices
-  kenari key [set|show|delete]  manage the stored API key
+  kenari configure [claude|codex] [role flags] [--yes]
+  kenari reset [claude|codex]
+  kenari claude [args...]
+  kenari codex [args...]
+  kenari status [--check] [--json]
+  kenari models [--json]
+  kenari login [--no-browser] [--paste] [--stdin]
+  kenari logout
+  kenari help
 
-tools: ${registry.map((a) => a.id).join(', ')}
+model values: native, picker, inherit, or kenari/<model-id>
 `;
 
 export async function main(argv) {
   try {
-    const [cmd, ...rest] = argv;
-    if (!cmd) return isTTY() ? await interactive() : (printStatus(), 0);
-    if (cmd === 'status') { printStatus(); return 0; }
-    if (cmd === 'login') return await cmdLogin(rest);
-    if (cmd === 'use') return await cmdUse(rest);
-    if (cmd === 'models') return await cmdModels();
-    if (cmd === 'key') return await cmdKey(rest);
-    if (cmd === '--help' || cmd === '-h' || cmd === 'help') { console.log(USAGE); return 0; }
-    console.error(`unknown command: ${cmd}\n${USAGE}`);
+    const [command, ...rest] = argv;
+    if (!command) {
+      console.log(USAGE);
+      return 0;
+    }
+    if (command === 'configure') return await cmdConfigure(rest);
+    if (command === 'reset') return await cmdReset(rest);
+    if (command === 'claude' || command === 'codex') return await runTool(command, rest);
+    if (command === 'status') return await cmdStatus(rest);
+    if (command === 'models') return await cmdModels(rest);
+    if (command === 'login') return await cmdLogin(rest);
+    if (command === 'logout') return await cmdLogout();
+    if (command === '--help' || command === '-h' || command === 'help') {
+      console.log(USAGE);
+      return 0;
+    }
+    console.error(`unknown command: ${command}\n${USAGE}`);
     return 1;
-  } catch (e) {
-    if (e instanceof KenariError) { console.error(`error: ${e.message}`); return 1; }
-    throw e;
+  } catch (error) {
+    if (error instanceof KenariError) {
+      console.error(`error: ${error.message}`);
+      return 1;
+    }
+    throw error;
   }
 }

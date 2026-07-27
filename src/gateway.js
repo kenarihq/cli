@@ -3,19 +3,51 @@ import { KenariError } from './store.js';
 
 export class AuthError extends KenariError {}
 
-export async function fetchModels(key) {
-  const base = gatewayBase();
+export function validateGatewayUrl(value = gatewayBase()) {
+  let url;
+  try { url = new URL(value); }
+  catch { throw new KenariError(`invalid Kenari gateway URL: ${value}`); }
+  const allowHttp = process.env.KENARI_ALLOW_HTTP === '1';
+  if (url.protocol !== 'https:' && !(url.protocol === 'http:' && allowHttp)) {
+    throw new KenariError('Kenari gateway must use HTTPS. Set KENARI_ALLOW_HTTP=1 only for local development.');
+  }
+  if (url.username || url.password) {
+    throw new KenariError('Kenari gateway URL must not contain credentials.');
+  }
+  return url.toString().replace(/\/+$/, '');
+}
+
+export async function fetchCatalog(key, options = {}) {
+  if (!key) throw new AuthError('Kenari login required. Run: kenari login');
+  const base = validateGatewayUrl(options.base || gatewayBase());
+  const controller = new AbortController();
+  const timeoutMs = options.timeoutMs ?? 5000;
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
+  const abort = () => controller.abort();
+  options.signal?.addEventListener('abort', abort, { once: true });
   let res;
   try {
-    res = await fetch(base + '/v1/models', { headers: { authorization: 'Bearer ' + key } });
+    res = await fetch(base + '/v1/models', {
+      headers: { authorization: 'Bearer ' + key },
+      signal: controller.signal,
+    });
   } catch (e) {
+    if (e.name === 'AbortError') throw new KenariError(`catalog request to ${base} timed out`);
     throw new KenariError(`cannot reach ${base}: ${e.cause?.code || e.message}`);
+  } finally {
+    clearTimeout(timer);
+    options.signal?.removeEventListener('abort', abort);
   }
   if (res.status === 401 || res.status === 403) {
-    throw new AuthError(`kenari rejected the API key (HTTP ${res.status}). Run: kenari key set`);
+    throw new AuthError(`Kenari rejected the credential (HTTP ${res.status}). Run: kenari login`);
   }
-  if (!res.ok) throw new KenariError(`gateway error (HTTP ${res.status})`);
-  const body = await res.json();
+  if (!res.ok) throw new KenariError(`Kenari catalog error (HTTP ${res.status})`);
+  try { return await res.json(); }
+  catch { throw new KenariError('Kenari catalog response is not valid JSON'); }
+}
+
+export async function fetchModels(key) {
+  const body = await fetchCatalog(key);
   return (body.data || []).map((m) => {
     // Only trust prices in the gateway's documented unit. An unknown unit
     // (or a future one) must not be printed as rupiah, so treat in/out as null.
