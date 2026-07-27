@@ -112,6 +112,44 @@ test('non-interactive automation rejects partial roles', async () => {
   assert.match(logs(), /missing --review, --subagents/);
 });
 
+test('configure target picker defaults to both and maps every choice', async () => {
+  const { chooseConfigureTools } = await import('../src/cli.js');
+  const expected = [
+    ['claude'],
+    ['codex'],
+    ['claude', 'codex'],
+  ];
+  for (let selection = 0; selection < expected.length; selection += 1) {
+    const chosen = await chooseConfigureTools(['claude', 'codex'], async (
+      title,
+      items,
+      defaultIndex,
+    ) => {
+      assert.equal(title, 'Configure which tool?');
+      assert.deepEqual(items, ['Claude Code', 'Codex CLI', 'Both']);
+      assert.equal(defaultIndex, 2);
+      return selection;
+    });
+    assert.deepEqual(chosen, expected[selection]);
+  }
+});
+
+test('configure target picker skips the prompt for one detected tool', async () => {
+  const { chooseConfigureTools } = await import('../src/cli.js');
+  let prompted = false;
+  const chosen = await chooseConfigureTools(['codex'], async () => {
+    prompted = true;
+    return 0;
+  });
+  assert.deepEqual(chosen, ['codex']);
+  assert.equal(prompted, false);
+});
+
+test('non-interactive configure requires an explicit tool', async () => {
+  assert.equal(await run('configure', '--yes'), 1);
+  assert.match(logs(), /--yes requires an explicit tool/);
+});
+
 test('fixed route validates catalog and writes namespaced config', async () => {
   process.env.KENARI_BASE_URL = await stubCatalog(CATALOG);
   process.env.KENARI_ALLOW_HTTP = '1';
