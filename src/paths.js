@@ -5,8 +5,12 @@ export function kenariHome() {
   return process.env.KENARI_HOME || path.join(os.homedir(), '.kenari');
 }
 export function credentialsPath() { return path.join(kenariHome(), 'credentials.json'); }
+export function configPath() { return path.join(kenariHome(), 'config.json'); }
+export function modelCachePath() { return path.join(kenariHome(), 'model-cache.json'); }
 export function statePath() { return path.join(kenariHome(), 'state.json'); }
 export function lockDir() { return path.join(kenariHome(), 'lock'); }
+export function backupsDir() { return path.join(kenariHome(), 'backups'); }
+export function runtimeDir() { return path.join(kenariHome(), 'run'); }
 export function claudeConfigDir() {
   return process.env.CLAUDE_CONFIG_DIR || path.join(os.homedir(), '.claude');
 }

@@ -17,7 +17,7 @@ export function writeFileAtomic(file, content) {
       `Point the CLI at the real file or edit it manually.`);
   }
   const mode = st ? (st.mode & 0o777) : 0o600;
-  fs.mkdirSync(path.dirname(file), { recursive: true });
+  fs.mkdirSync(path.dirname(file), { recursive: true, mode: 0o700 });
   const tmp = path.join(path.dirname(file), `.${path.basename(file)}.kenari-${process.pid}.tmp`);
   fs.writeFileSync(tmp, content, { mode });
   try { fs.chmodSync(tmp, mode); } catch {}
@@ -48,6 +48,17 @@ export function writeJson(file, obj) {
   writeFileAtomic(file, JSON.stringify(obj, null, 2) + '\n');
 }
 
+export function writePrivateJson(file, obj) {
+  writeJson(file, obj);
+  try { fs.chmodSync(path.dirname(file), 0o700); } catch {}
+  try { fs.chmodSync(file, 0o600); } catch {}
+}
+
+export function removeFile(file) {
+  try { fs.rmSync(file); return true; }
+  catch (e) { if (e.code === 'ENOENT') return false; throw e; }
+}
+
 export function getKey() {
   const c = readJson(credentialsPath());
   return c && typeof c.api_key === 'string' ? c.api_key : null;
@@ -57,10 +68,10 @@ export function setKey(key) {
   if (!/^kn-[A-Za-z0-9]{8,}$/.test(k)) {
     throw new KenariError('That does not look like a kenari API key (kn-...). Get one at https://kenari.id/keys');
   }
-  writeJson(credentialsPath(), { api_key: k });
+  writePrivateJson(credentialsPath(), { api_key: k });
 }
 export function deleteKey() {
-  try { fs.rmSync(credentialsPath()); } catch {}
+  removeFile(credentialsPath());
 }
 export function maskKey(key) {
   return key.slice(0, 6) + '...' + key.slice(-3);
@@ -68,20 +79,33 @@ export function maskKey(key) {
 
 export function loadState() {
   const parsed = readJson(statePath());
+  if (parsed?.version === 2) {
+    return {
+      version: 2,
+      migration: parsed.migration && typeof parsed.migration === 'object' ? parsed.migration : {},
+      tools: {},
+    };
+  }
   if (parsed && parsed.version && parsed.version !== 1) {
     throw new KenariError('state.json was written by a newer kenari CLI; upgrade this CLI or remove ~/.kenari/state.json');
   }
-  return { version: 1, tools: (parsed && typeof parsed.tools === 'object' && parsed.tools) || {} };
+  return {
+    version: 1,
+    tools: (parsed && typeof parsed.tools === 'object' && parsed.tools) || {},
+    migration_conflicts: Array.isArray(parsed?.migration_conflicts) ? parsed.migration_conflicts : [],
+  };
 }
-export function saveState(state) { writeJson(statePath(), state); }
+export function saveState(state) { writePrivateJson(statePath(), state); }
 export function getToolState(id) { return loadState().tools[id] || null; }
 export function setToolState(id, toolState) {
   const s = loadState();
+  if (s.version !== 1) throw new KenariError('legacy provider switching is unavailable after version 2 migration');
   s.tools[id] = toolState;
   saveState(s);
 }
 export function clearToolState(id) {
   const s = loadState();
+  if (s.version !== 1) throw new KenariError('legacy provider switching is unavailable after version 2 migration');
   delete s.tools[id];
   saveState(s);
 }

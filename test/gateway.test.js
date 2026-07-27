@@ -1,8 +1,10 @@
-import { test, after } from 'node:test';
+import { test, before, after } from 'node:test';
 import assert from 'node:assert/strict';
 import http from 'node:http';
 
 const servers = [];
+const originalAllowHttp = process.env.KENARI_ALLOW_HTTP;
+before(() => { process.env.KENARI_ALLOW_HTTP = '1'; });
 function stub(handler) {
   return new Promise((resolve) => {
     const s = http.createServer(handler);
@@ -10,7 +12,11 @@ function stub(handler) {
     s.listen(0, '127.0.0.1', () => resolve(`http://127.0.0.1:${s.address().port}`));
   });
 }
-after(() => servers.forEach((s) => s.close()));
+after(() => {
+  servers.forEach((s) => s.close());
+  if (originalAllowHttp === undefined) delete process.env.KENARI_ALLOW_HTTP;
+  else process.env.KENARI_ALLOW_HTTP = originalAllowHttp;
+});
 
 test('fetchModels: happy path maps pricing and context', async () => {
   const base = await stub((req, res) => {

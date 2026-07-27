@@ -114,11 +114,11 @@ test('withLock: empty lock file backdated 5s is stale', async () => {
   assert.equal(fs.existsSync(lockDir()), false);
 });
 
-test('loadState rejects a newer state schema version', async () => {
+test('loadState rejects an unknown newer state schema version', async () => {
   const { loadState, KenariError } = await import('../src/store.js');
   const { statePath } = await import('../src/paths.js');
   fs.mkdirSync(path.dirname(statePath()), { recursive: true });
-  fs.writeFileSync(statePath(), '{"version":2,"tools":{}}');
+  fs.writeFileSync(statePath(), '{"version":3,"tools":{}}');
   assert.throws(() => loadState(), KenariError);
 });
 
