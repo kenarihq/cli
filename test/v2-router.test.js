@@ -2,7 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import http from 'node:http';
 import { spawn } from 'node:child_process';
-import { startRouter } from '../src/router.js';
+import { sanitizeForkExecArgv, startRouter } from '../src/router.js';
 
 const originalAllowHttp = process.env.KENARI_ALLOW_HTTP;
 test.before(() => { process.env.KENARI_ALLOW_HTTP = '1'; });
@@ -154,4 +154,17 @@ test('router child exits when wrapper parent IPC closes', async () => {
   assert.ok(pid > 0, Buffer.concat(errors).toString());
   await new Promise((resolve) => setTimeout(resolve, 50));
   assert.throws(() => process.kill(pid, 0), /ESRCH/);
+});
+
+test('router child strips eval-only parent arguments', () => {
+  assert.deepEqual(
+    sanitizeForkExecArgv([
+      '--trace-warnings',
+      '--input-type=module',
+      '-e',
+      'import "./parent.js"',
+      '--no-warnings',
+    ]),
+    ['--trace-warnings', '--no-warnings'],
+  );
 });

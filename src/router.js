@@ -190,6 +190,23 @@ function childError(message) {
   return error;
 }
 
+export function sanitizeForkExecArgv(execArgv = process.execArgv) {
+  const safe = [];
+  for (let index = 0; index < execArgv.length; index += 1) {
+    const arg = execArgv[index];
+    if (['-e', '--eval', '-p', '--print'].includes(arg)) {
+      index += 1;
+      continue;
+    }
+    if (arg.startsWith('--eval=') || arg.startsWith('--print=')
+      || arg.startsWith('--input-type')) {
+      continue;
+    }
+    safe.push(arg);
+  }
+  return safe;
+}
+
 export async function startRouter(options) {
   if (typeof options?.compatibility === 'function') {
     throw new KenariError('router compatibility rules must be serializable data');
@@ -197,7 +214,7 @@ export async function startRouter(options) {
   validateGatewayUrl(options.kenariBase);
   const child = fork(fileURLToPath(import.meta.url), [], {
     env: { ...process.env, KENARI_ROUTER_CHILD: '1' },
-    execArgv: process.execArgv.filter((arg) => !arg.startsWith('--input-type')),
+    execArgv: sanitizeForkExecArgv(),
     stdio: ['ignore', 'ignore', 'pipe', 'ipc'],
   });
   let childStderr = '';
