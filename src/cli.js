@@ -234,24 +234,56 @@ function printRoutingSummary(tool, roles) {
   }
 }
 
+function detectedTools() {
+  return registry.filter((adapter) => {
+    try {
+      resolveBinary(adapter.id, { exclude: [process.argv[1]] });
+      return true;
+    } catch {
+      return adapter.detect().installed;
+    }
+  }).map((adapter) => adapter.id);
+}
+
+export async function chooseConfigureTools(installed, choose = pickNumber) {
+  if (installed.length === 1) return [...installed];
+  const options = registry.map((adapter) => ({
+    label: adapter.name,
+    tools: [adapter.id],
+  }));
+  options.push({ label: 'Both', tools: registry.map((adapter) => adapter.id) });
+  const selected = await choose(
+    'Configure which tool?',
+    options.map((option) => option.label),
+    options.length - 1,
+  );
+  return options[selected].tools;
+}
+
 async function cmdConfigure(argv) {
   const { flags, rest } = parseFlags(argv);
   const requested = rest[0];
   if (requested) assertTool(requested);
-  const tools = requested
-    ? [requested]
-    : registry.filter((adapter) => {
-      try {
-        resolveBinary(adapter.id, { exclude: [process.argv[1]] });
-        return true;
-      } catch {
-        return adapter.detect().installed;
-      }
-    }).map((adapter) => adapter.id);
-  if (!tools.length) throw new KenariError('no supported tools installed (looked for Claude Code and Codex)');
+  let tools;
+  if (requested) {
+    tools = [requested];
+  } else {
+    if (flags.yes) {
+      throw new KenariError('--yes requires an explicit tool: kenari configure claude|codex');
+    }
+    if (!isTTY()) {
+      throw new KenariError('non-interactive configuration requires an explicit tool');
+    }
+    const installed = detectedTools();
+    if (!installed.length) {
+      console.log('warning: Claude Code and Codex were not detected');
+    }
+    tools = await chooseConfigureTools(installed);
+  }
 
   for (const tool of tools) await prepareMigration(tool);
   let config = loadConfig() || { version: 2, tools: {} };
+  const summaries = [];
   for (const tool of tools) {
     const current = getToolConfig(config, tool)?.roles || null;
     let roles;
@@ -277,8 +309,9 @@ async function cmdConfigure(argv) {
       version: 2,
       tools: { ...config.tools, [tool]: { roles } },
     };
-    printRoutingSummary(tool, roles);
+    summaries.push([tool, roles]);
   }
+  for (const [tool, roles] of summaries) printRoutingSummary(tool, roles);
   await withLock(() => saveConfig(config));
   console.log('ok: routing configuration saved');
   return 0;

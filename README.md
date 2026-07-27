@@ -24,6 +24,10 @@ kenari configure
 
 Node.js 18 or newer is required.
 
+When Claude Code and Codex are both installed, `kenari configure` asks which
+tool to configure and defaults to `Both`. If only one is installed, Kenari
+selects it automatically. Non-interactive use must name `claude` or `codex`.
+
 ## Commands
 
 ```text
