@@ -49,8 +49,10 @@ test('v2 config validates complete roles, persists securely, and detects Kenari 
   assert.deepEqual(loadConfig(), value);
   assert.equal(hasKenariRoutes(value), true);
   assert.equal(hasKenariRoutes(value, 'claude'), false);
-  assert.equal(fs.statSync(dir).mode & 0o777, 0o700);
-  assert.equal(fs.statSync(path.join(dir, 'config.json')).mode & 0o777, 0o600);
+  if (process.platform !== 'win32') {
+    assert.equal(fs.statSync(dir).mode & 0o777, 0o700);
+    assert.equal(fs.statSync(path.join(dir, 'config.json')).mode & 0o777, 0o600);
+  }
 });
 
 test('v2 config rejects partial roles, bad mode placement, and unprefixed fixed model', () => {

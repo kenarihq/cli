@@ -82,12 +82,16 @@ test('clean v1 migration restores owned values, removes credentials, converts ro
   const codex = fs.readFileSync(codexFile, 'utf8');
   assert.match(codex, /model = "native-model"/);
   assert.doesNotMatch(codex, /kn-secret|model_provider|model_providers\.kenari/);
-  assert.equal(fs.statSync(codexFile).mode & 0o777, 0o640);
+  if (process.platform !== 'win32') {
+    assert.equal(fs.statSync(codexFile).mode & 0o777, 0o640);
+  }
   const config = readJson(configPath());
   assert.deepEqual(config.tools.claude.roles.main, { mode: 'fixed', model: 'kenari/sonnet-k' });
   assert.deepEqual(config.tools.codex.roles.main, { mode: 'fixed', model: 'kenari/gpt-k' });
   assert.equal(result.backups.length, 2);
-  assert.equal(fs.statSync(result.backups[1].path).mode & 0o777, 0o640);
+  if (process.platform !== 'win32') {
+    assert.equal(fs.statSync(result.backups[1].path).mode & 0o777, 0o640);
+  }
   assert.equal(readJson(statePath()).version, 2);
 });
 
