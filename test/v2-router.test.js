@@ -91,6 +91,83 @@ test('router isolates native and Kenari model, auth, headers, and token rewrites
   assert.ok(router.childPid > 0);
 });
 
+test('router strips Claude 1m markers from Kenari models before lookup and forwarding', async (t) => {
+  const seen = [];
+  const base = await upstream(t, async (req, res) => {
+    seen.push(await collect(req));
+    res.writeHead(200, { 'content-type': 'application/json' });
+    res.end('{"ok":true}');
+  });
+  const router = await startRouter({
+    nativeBase: base,
+    kenariBase: base,
+    credential: 'kn-secret',
+    catalog: { models: [{ id: 'minimax-m3' }] },
+  });
+  t.after(() => router.close());
+
+  for (const marker of ['[1m]', '[1M]']) {
+    const response = await fetch(router.url + '/v1/messages', {
+      method: 'POST',
+      body: JSON.stringify({ model: `kenari/minimax-m3${marker}` }),
+    });
+    assert.equal(response.status, 200);
+    assert.deepEqual(await response.json(), { ok: true });
+  }
+
+  const native = await fetch(router.url + '/v1/messages', {
+    method: 'POST',
+    body: JSON.stringify({ model: 'claude-opus-5[1m]' }),
+  });
+  assert.equal(native.status, 200);
+  assert.deepEqual(await native.json(), { ok: true });
+
+  const malformed = await fetch(router.url + '/v1/messages', {
+    method: 'POST',
+    body: JSON.stringify({ model: 'kenari/minimax-m3[1m]-extra' }),
+  });
+  assert.equal(malformed.status, 400);
+  assert.deepEqual(
+    seen.map((body) => body.model),
+    ['minimax-m3', 'minimax-m3', 'claude-opus-5[1m]'],
+  );
+});
+
+test('router terminates the client response when an upstream stream aborts', async (t) => {
+  const base = await upstream(t, (_req, res) => {
+    res.writeHead(200, { 'content-type': 'text/event-stream' });
+    res.write('data: partial\n\n');
+    setImmediate(() => res.socket.destroy());
+  });
+  const router = await startRouter({
+    nativeBase: base,
+    kenariBase: base,
+    catalog: { models: [] },
+  });
+  t.after(() => router.close());
+
+  const response = await fetch(router.url + '/v1/messages', {
+    method: 'POST',
+    body: JSON.stringify({ model: 'claude-opus-5' }),
+  });
+  assert.equal(response.status, 200);
+
+  let timeout;
+  const outcome = await Promise.race([
+    response.text().then(
+      () => ({ completed: true }),
+      (error) => ({ error }),
+    ),
+    new Promise((resolve) => {
+      timeout = setTimeout(() => resolve({ timedOut: true }), 1_000);
+    }),
+  ]);
+  clearTimeout(timeout);
+
+  assert.equal(outcome.timedOut, undefined, 'aborted stream must not remain open');
+  assert.ok(outcome.error, 'aborted stream must reject the downstream reader');
+});
+
 test('router fails closed for unknown or logged-out Kenari model', async (t) => {
   let requests = 0;
   const base = await upstream(t, (_req, res) => { requests += 1; res.end(); });

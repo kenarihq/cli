@@ -18,6 +18,10 @@ const NATIVE_AUTH_HEADERS = [
   'authorization', 'x-api-key', 'api-key', 'anthropic-api-key',
 ];
 
+function stripClaudeOneMMarker(model) {
+  return model.replace(/\[1m\]$/i, '');
+}
+
 function safeHeaders(headers, strip) {
   const dynamicStrip = new Set(strip);
   for (const token of String(headers.connection || '').split(',')) {
@@ -106,7 +110,9 @@ async function startRouterServer(options) {
 
     const selected = typeof body?.model === 'string' ? body.model : '';
     const isKenari = selected.startsWith('kenari/');
-    const id = isKenari ? selected.slice('kenari/'.length) : selected;
+    const id = isKenari
+      ? stripClaudeOneMMarker(selected.slice('kenari/'.length))
+      : selected;
     const model = isKenari ? models.get(id) : null;
     if (isKenari && (!id || !model)) {
       replyJson(res, 400, `unknown or unavailable Kenari model "${selected}"`);
@@ -146,6 +152,18 @@ async function startRouterServer(options) {
     }, (upstreamRes) => {
       const responseHeaders = safeHeaders(upstreamRes.headers, RESPONSE_STRIP);
       res.writeHead(upstreamRes.statusCode || 502, responseHeaders);
+      const terminateDownstream = (error) => {
+        if (!res.destroyed) res.destroy(error);
+      };
+      upstreamRes.on('aborted', () => {
+        terminateDownstream(new Error(`${isKenari ? 'Kenari' : 'native'} upstream response aborted`));
+      });
+      upstreamRes.on('error', terminateDownstream);
+      upstreamRes.on('close', () => {
+        if (!upstreamRes.complete) {
+          terminateDownstream(new Error(`${isKenari ? 'Kenari' : 'native'} upstream response closed early`));
+        }
+      });
       upstreamRes.pipe(res);
       res.on('close', () => {
         if (!res.writableEnded) upstreamRes.destroy();
