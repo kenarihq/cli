@@ -286,12 +286,33 @@ test('loginApiKey: stores a valid key, rejects a malformed or empty one', async 
   assert.match(logs(), /ok: stored kn-f4k\.\.\./);
 });
 
-// Ctrl-D at the key prompt used to leave askHidden's promise pending, so the
+// A masked prompt is only worth anything if it masks. Asserting the rendered
+// row directly, because the failure mode is silent: writing the line instead
+// of the mask puts a live credential into scrollback and still "works".
+test('the key prompt renders one mask character per key character, never the key', async () => {
+  const { renderMasked } = await import('../src/prompt.js');
+  const key = 'kn-f4kef4kef4kef4kef4kef4kef4ke1234';
+  const prompt = 'Paste your kenari API key: ';
+  const writes = [];
+  const fake = { isTTY: true, columns: 80, write: (s) => writes.push(s) };
+
+  renderMasked(fake, prompt, key);
+  const rendered = writes.join('');
+  assert.ok(rendered.includes(prompt + '*'.repeat(key.length)), 'masked row');
+  assert.doesNotMatch(rendered, /kn-/, 'the key must never reach the terminal');
+
+  // Backspace has to shrink the row, otherwise the mask count lies.
+  writes.length = 0;
+  renderMasked(fake, prompt, key.slice(0, 4));
+  assert.ok(writes.join('').includes(prompt + '****'), 'shrinks with the line');
+});
+
+// Ctrl-D at the key prompt used to leave the prompt's promise pending, so the
 // process fell off the end with exit 0 and no credential. `kenari login
 // --api-key && kenari configure` would then run configure against no login.
-test('askHidden resolves empty on EOF so an abandoned prompt fails loudly', async () => {
+test('askSecret resolves empty on EOF so an abandoned prompt fails loudly', async () => {
   const { PassThrough } = await import('node:stream');
-  const { askHidden } = await import('../src/prompt.js');
+  const { askSecret: askHidden } = await import('../src/prompt.js');
   const { loginApiKey } = await import('../src/cli.js');
   const { getKey } = await import('../src/store.js');
 

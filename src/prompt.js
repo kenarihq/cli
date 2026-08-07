@@ -4,11 +4,30 @@ function rl() {
   return readline.createInterface({ input: process.stdin, output: process.stdout });
 }
 
-export function askHidden(question) {
+const MASK = '*';
+
+// Redraws the prompt with one mask character per character entered so far.
+// Renders from the interface's current line rather than the chunk readline
+// happened to hand over: a paste arrives as one chunk and still shows its full
+// width, backspace shrinks the row, and readline's cursor escapes never leak
+// through. ASCII mask on purpose, since a bullet renders as `?` in a legacy
+// Windows console codepage.
+export function renderMasked(output, prompt, line) {
+  readline.cursorTo(output, 0);
+  readline.clearLine(output, 0);
+  output.write(prompt + MASK.repeat(line.length));
+}
+
+export function askSecret(question) {
   return new Promise((resolve) => {
     const iface = rl();
+    // Masking needs a terminal to redraw. With stdout redirected, stay silent
+    // rather than write escape codes into whatever is capturing the output.
+    const echo = Boolean(process.stdout.isTTY);
     process.stdout.write(question);
-    iface._writeToOutput = () => {};
+    iface._writeToOutput = () => {
+      if (echo) renderMasked(process.stdout, question, iface.line);
+    };
     iface.question('', (answer) => {
       process.stdout.write('\n');
       resolve(answer.trim());
