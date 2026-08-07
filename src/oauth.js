@@ -20,10 +20,6 @@ export function buildLoopbackUrl(base, { challenge, state, port, host }) {
     `&port=${port}&host=${encodeURIComponent(host)}`;
 }
 
-export function buildPasteUrl(base, { challenge, host }) {
-  return `${base}/cli-auth?challenge=${encodeURIComponent(challenge)}&host=${encodeURIComponent(host)}&paste=1`;
-}
-
 // Self-contained: never reflects the code or a key. Just tells the person to
 // go back to the terminal.
 const CALLBACK_HTML = `<!doctype html>

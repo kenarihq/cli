@@ -6,7 +6,6 @@ import {
   genPkce,
   genState,
   buildLoopbackUrl,
-  buildPasteUrl,
   startCallbackServer,
   handleCallbackRequest,
 } from '../src/oauth.js';
@@ -44,16 +43,6 @@ test('buildLoopbackUrl: has challenge, state, port, host and a valid integer por
   const port = Number(u.searchParams.get('port'));
   assert.ok(Number.isInteger(port) && port > 0);
   assert.equal(port, 54321);
-});
-
-test('buildPasteUrl: has paste=1, no port or state', () => {
-  const url = buildPasteUrl('https://kenari.id', { challenge: 'c1', host: 'my host' });
-  const u = new URL(url);
-  assert.equal(u.searchParams.get('challenge'), 'c1');
-  assert.equal(u.searchParams.get('host'), 'my host');
-  assert.equal(u.searchParams.get('paste'), '1');
-  assert.equal(u.searchParams.get('port'), null);
-  assert.equal(u.searchParams.get('state'), null);
 });
 
 test('callback server: wrong state is rejected and keeps listening; right state resolves with the code', async () => {
