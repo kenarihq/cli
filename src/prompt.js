@@ -10,10 +10,16 @@ export function askHidden(question) {
     process.stdout.write(question);
     iface._writeToOutput = () => {};
     iface.question('', (answer) => {
-      iface.close();
       process.stdout.write('\n');
       resolve(answer.trim());
+      iface.close();
     });
+    // Ctrl-D (or a closed stdin) ends the interface without ever firing the
+    // question callback. Resolve empty so the caller fails loudly instead of
+    // the process exiting 0 with nothing stored. Registered after question()
+    // and relying on resolve() being idempotent: a real answer resolves first,
+    // and the close it triggers is then a no-op.
+    iface.once('close', () => resolve(''));
   });
 }
 

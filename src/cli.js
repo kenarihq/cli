@@ -29,7 +29,7 @@ import {
 import { fetchCatalog, formatRp } from './gateway.js';
 import { ask, askHidden, askYesNo, pickNumber } from './prompt.js';
 import { gatewayBase, modelCachePath, runtimeDir } from './paths.js';
-import { genPkce, genState, buildLoopbackUrl, buildPasteUrl, startCallbackServer } from './oauth.js';
+import { genPkce, genState, buildLoopbackUrl, startCallbackServer } from './oauth.js';
 import { resolveBinary, runWrappedTool } from './supervisor.js';
 import { buildClaudeLaunch } from './runtime/claude.js';
 import {
@@ -572,10 +572,10 @@ function openBrowser(url) {
   } catch {}
 }
 
-function printLoginUrl(url, flags) {
+function printLoginUrl(url) {
   console.log('Open this URL to approve:');
   console.log(url);
-  if (!flags['no-browser']) openBrowser(url);
+  openBrowser(url);
 }
 
 async function exchangeCode(base, code, verifier) {
@@ -610,11 +610,11 @@ async function finishLogin(base, code, verifier) {
   }
 }
 
-async function loginLoopback(base, host, flags) {
+async function loginLoopback(base, host) {
   const { verifier, challenge } = genPkce();
   const state = genState();
   const { server, port, codePromise } = await startCallbackServer(state);
-  printLoginUrl(buildLoopbackUrl(base, { challenge, state, port, host }), flags);
+  printLoginUrl(buildLoopbackUrl(base, { challenge, state, port, host }));
   let timer;
   let signalHandler;
   try {
@@ -642,27 +642,49 @@ async function loginLoopback(base, host, flags) {
   }
 }
 
-async function loginPaste(base, host, flags) {
-  const { verifier, challenge } = genPkce();
-  printLoginUrl(buildPasteUrl(base, { challenge, host }), flags);
-  if (!isTTY()) throw new KenariError('paste mode needs an interactive terminal');
-  const code = await ask('Paste the code shown in your browser: ');
-  if (!code) throw new KenariError('no code entered');
-  return finishLogin(base, code, verifier);
+const LOGIN_USAGE = 'usage: kenari login [--api-key]';
+const KEYS_URL = 'https://kenari.id/keys';
+
+// Hidden prompt on a terminal, stdin when piped, so one flag covers both an
+// SSH session and a container entrypoint. Gated on stdin alone: stdout may be
+// redirected while the operator is still typing at a real terminal.
+async function readApiKey() {
+  if (process.stdin.isTTY) return askHidden(`Paste your kenari API key (kn-...): `);
+  return readStdinLine();
 }
+
+export async function loginApiKey(read = readApiKey) {
+  const key = await read();
+  if (!key) throw new KenariError(`no API key entered. Create one at ${KEYS_URL}`);
+  setKey(key);
+  console.log(`ok: stored ${maskKey(key)}`);
+  return 0;
+}
+
+const REMOVED_LOGIN_FLAGS = ['no-browser', 'paste', 'stdin'];
 
 async function cmdLogin(argv) {
   const { flags, rest } = parseFlags(argv);
-  if (rest.length) throw new KenariError('usage: kenari login [--no-browser] [--paste] [--stdin]');
-  if (flags.stdin) {
-    const key = await readStdinLine();
-    setKey(key);
-    console.log(`ok: stored ${maskKey(key)}`);
-    return 0;
+  if (rest.length) throw new KenariError(LOGIN_USAGE);
+  const removed = REMOVED_LOGIN_FLAGS.find((flag) => flag in flags);
+  if (removed) {
+    throw new KenariError(
+      `--${removed} was removed. On a machine with no browser, run \`kenari login --api-key\` ` +
+      `and paste a key from ${KEYS_URL}.\n${LOGIN_USAGE}`);
+  }
+  if ('api-key' in flags) {
+    // parseFlags would happily swallow `--api-key kn-...`; refuse it rather
+    // than let the key land in shell history and in `ps` output.
+    if (typeof flags['api-key'] === 'string') {
+      throw new KenariError(
+        '--api-key takes no value: a key passed on the command line is recorded in your shell ' +
+        'history and visible in `ps`. Run `kenari login --api-key` and paste at the prompt, ' +
+        'or pipe it: echo "$KENARI_KEY" | kenari login --api-key');
+    }
+    return loginApiKey();
   }
   const base = typeof flags.base === 'string' && flags.base ? flags.base : gatewayBase();
-  const host = os.hostname();
-  return flags.paste ? loginPaste(base, host, flags) : loginLoopback(base, host, flags);
+  return loginLoopback(base, os.hostname());
 }
 
 async function cmdLogout() {
@@ -680,7 +702,7 @@ usage:
   kenari codex [args...]
   kenari status [--check] [--json]
   kenari models [--json]
-  kenari login [--no-browser] [--paste] [--stdin]
+  kenari login [--api-key]
   kenari logout
   kenari help
 

@@ -37,13 +37,46 @@ kenari claude [args...]
 kenari codex [args...]
 kenari status [--check] [--json]
 kenari models [--json]
-kenari login [--no-browser] [--paste] [--stdin]
+kenari login [--api-key]
 kenari logout
 kenari help
 ```
 
 `kenari use` and `kenari key` were removed. Routing is process-scoped and
 credentials are managed by `login` and `logout`.
+
+## Signing in
+
+`kenari login` opens a browser and completes approval over a loopback callback
+on `127.0.0.1`. That needs a browser on the same machine as the CLI.
+
+On a server, container, or SSH session, use `--api-key` instead and paste a key
+created at <https://kenari.id/keys>:
+
+```bash
+kenari login --api-key
+```
+
+The prompt is hidden. When stdin is not a terminal the same flag reads the key
+from stdin, so an entrypoint or CI step can run:
+
+```bash
+echo "$KENARI_KEY" | kenari login --api-key
+```
+
+Never pass the key as an argument. `kenari login --api-key kn-...` is rejected
+because a key on the command line is written to shell history and is visible in
+`ps` to every user on the machine.
+
+For a container with a read-only home directory, point `KENARI_HOME` at a
+writable path before logging in:
+
+```bash
+export KENARI_HOME=/tmp/kenari
+echo "$KENARI_KEY" | kenari login --api-key
+```
+
+`--no-browser`, `--paste`, and `--stdin` were removed in favor of `--api-key`.
 
 ## Routing configuration
 

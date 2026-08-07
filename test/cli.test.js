@@ -27,18 +27,22 @@ after(() => {
   for (const server of servers) server.close();
 });
 
-async function run(...argv) {
+async function capture(fn) {
   const originalLog = console.log;
   const originalError = console.error;
   console.log = (...args) => output.push(args.join(' '));
   console.error = (...args) => output.push(args.join(' '));
   try {
-    const { main } = await import('../src/cli.js');
-    return await main(argv);
+    return await fn();
   } finally {
     console.log = originalLog;
     console.error = originalError;
   }
+}
+
+async function run(...argv) {
+  const { main } = await import('../src/cli.js');
+  return capture(() => main(argv));
 }
 
 function stubCatalog(models) {
@@ -240,6 +244,71 @@ test('logout deletes only the Kenari credential', async () => {
   assert.equal(await run('logout'), 0);
   assert.equal(getKey(), null);
   assert.equal(fs.existsSync(path.join(process.env.KENARI_HOME, 'config.json')), true);
+});
+
+// The whole point of --api-key is a headless machine, so every cell of the
+// flag matrix is asserted, not just the happy path: a removed flag that still
+// silently ran the loopback flow would hang a VPS for five minutes.
+test('login flag matrix: every removed flag is rejected and stores nothing', async () => {
+  const { getKey } = await import('../src/store.js');
+  const cases = [
+    { argv: ['login', '--stdin'], match: /--stdin was removed/ },
+    { argv: ['login', '--paste'], match: /--paste was removed/ },
+    { argv: ['login', '--no-browser'], match: /--no-browser was removed/ },
+    { argv: ['login', 'extra'], match: /usage: kenari login \[--api-key\]/ },
+    { argv: ['login', '--api-key', 'kn-testkey123'], match: /shell (\s|\S)*history/ },
+  ];
+  for (const { argv, match } of cases) {
+    output = [];
+    assert.equal(await run(...argv), 1, `${argv.join(' ')} should exit 1`);
+    assert.match(logs(), match, `${argv.join(' ')} message`);
+    assert.equal(getKey(), null, `${argv.join(' ')} must not store a key`);
+  }
+  // The removal notice has to point at the replacement, or a VPS user is stuck.
+  output = [];
+  await run('login', '--paste');
+  assert.match(logs(), /kenari login --api-key/);
+});
+
+test('loginApiKey: stores a valid key, rejects a malformed or empty one', async () => {
+  const { loginApiKey } = await import('../src/cli.js');
+  const { getKey } = await import('../src/store.js');
+  const key = 'kn-f4kef4kef4kef4kef4kef4kef4ke1234';
+
+  await assert.rejects(() => loginApiKey(async () => ''), /no API key entered/);
+  assert.equal(getKey(), null);
+  await assert.rejects(() => loginApiKey(async () => 'sk-not-a-kenari-key'), /kenari API key/);
+  assert.equal(getKey(), null);
+
+  assert.equal(await capture(() => loginApiKey(async () => key)), 0);
+  assert.equal(getKey(), key);
+  assert.doesNotMatch(logs(), new RegExp(key), 'the stored key must never be echoed in full');
+  assert.match(logs(), /ok: stored kn-f4k\.\.\./);
+});
+
+// Ctrl-D at the key prompt used to leave askHidden's promise pending, so the
+// process fell off the end with exit 0 and no credential. `kenari login
+// --api-key && kenari configure` would then run configure against no login.
+test('askHidden resolves empty on EOF so an abandoned prompt fails loudly', async () => {
+  const { PassThrough } = await import('node:stream');
+  const { askHidden } = await import('../src/prompt.js');
+  const { loginApiKey } = await import('../src/cli.js');
+  const { getKey } = await import('../src/store.js');
+
+  const fake = new PassThrough();
+  const realStdin = Object.getOwnPropertyDescriptor(process, 'stdin');
+  Object.defineProperty(process, 'stdin', { value: fake, configurable: true });
+  try {
+    const answered = capture(() => askHidden('key: '));
+    fake.end();
+    assert.equal(await answered, '');
+  } finally {
+    Object.defineProperty(process, 'stdin', realStdin);
+  }
+
+  // An empty read must surface as a non-zero exit, not a silent success.
+  await assert.rejects(() => loginApiKey(async () => ''), /no API key entered/);
+  assert.equal(getKey(), null);
 });
 
 test('wrapper requires configuration outside a TTY', async () => {
