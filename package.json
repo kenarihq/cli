@@ -1,6 +1,6 @@
 {
   "name": "@kenarihq/cli",
-  "version": "0.4.1",
+  "version": "0.4.3",
   "description": "Official kenari CLI. Route Claude Code and Codex models per process.",
   "license": "MIT",
   "type": "module",
