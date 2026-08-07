@@ -27,7 +27,7 @@ import {
   writeMergedCodexCatalog,
 } from './catalog.js';
 import { fetchCatalog, formatRp } from './gateway.js';
-import { ask, askHidden, askYesNo, pickNumber } from './prompt.js';
+import { ask, askSecret, askYesNo, pickNumber } from './prompt.js';
 import { gatewayBase, modelCachePath, runtimeDir } from './paths.js';
 import { genPkce, genState, buildLoopbackUrl, startCallbackServer } from './oauth.js';
 import { resolveBinary, runWrappedTool } from './supervisor.js';
@@ -649,8 +649,9 @@ const KEYS_URL = 'https://kenari.id/keys';
 // SSH session and a container entrypoint. Gated on stdin alone: stdout may be
 // redirected while the operator is still typing at a real terminal.
 async function readApiKey() {
-  if (process.stdin.isTTY) return askHidden(`Paste your kenari API key (kn-...): `);
-  return readStdinLine();
+  if (!process.stdin.isTTY) return readStdinLine();
+  console.log(`Create a key at ${KEYS_URL}`);
+  return askSecret('Paste your kenari API key: ');
 }
 
 export async function loginApiKey(read = readApiKey) {

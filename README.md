@@ -57,8 +57,10 @@ created at <https://kenari.id/keys>:
 kenari login --api-key
 ```
 
-The prompt is hidden. When stdin is not a terminal the same flag reads the key
-from stdin, so an entrypoint or CI step can run:
+The prompt masks what you paste, showing one `*` per character so you can see
+the paste landed without the key reaching your scrollback. When stdin is not a
+terminal the same flag reads the key from stdin, so an entrypoint or CI step
+can run:
 
 ```bash
 echo "$KENARI_KEY" | kenari login --api-key
