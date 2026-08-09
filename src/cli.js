@@ -10,6 +10,7 @@ import {
   getKey,
   loadState,
   maskKey,
+  recordEffort,
   removeFile,
   saveState,
   setKey,
@@ -353,6 +354,10 @@ function effortAge(at) {
   return `${Math.round(hours / 24)}d ago`;
 }
 
+function effortRecords(state) {
+  return Object.values(state.effort || {}).sort((a, b) => b.at - a.at);
+}
+
 function effortSummary(effort) {
   // Neither absent value borrows the word none, because none is itself a level a
   // client can pick and a gateway can apply. "unset" is a client that sent no level,
@@ -449,7 +454,11 @@ async function cmdStatus(argv) {
   }
   console.log(`credential  ${status.credential}`);
   console.log(`catalog     ${status.cache ? `${status.cache.models} models, age ${Math.round(status.cache.age_ms / 1000)}s` : 'missing'}`);
-  if (status.effort) console.log(`effort      ${effortSummary(status.effort)}`);
+  // One line per model, newest first. The pre-launch banner lists every fixed slot, so
+  // reporting a single global record could not answer what that banner raises.
+  for (const record of effortRecords(status)) {
+    console.log(`effort      ${effortSummary(record)}`);
+  }
   for (const conflict of status.migration_conflicts) {
     console.log(`conflict    ${conflict.tool}.${conflict.key}`);
   }
@@ -623,12 +632,9 @@ async function runTool(tool, args) {
         credential: key,
         catalog: cache,
         capabilityToken: tool === 'claude' ? randomBytes(32).toString('base64url') : null,
-        onEffort: (record) => {
-          try {
-            // Concurrent sessions may race. Last diagnostic record wins by design.
-            saveState({ ...loadState(), effort: record });
-          } catch {}
-        },
+        // Diagnostic, never load bearing: a failed write must not disturb the session,
+        // and nothing is printed because the tool owns the terminal from here.
+        onEffort: (record) => { try { recordEffort(record); } catch {} },
       },
       runtimeBuilder,
       runtimeOptions: { toolConfig, catalogPath },

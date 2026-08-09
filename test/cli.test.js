@@ -278,31 +278,32 @@ test('the narrowing warning names Codex when Codex is what is launching', async 
 test('status renders effort record and distinguishes unreported from none', async () => {
   const { saveState } = await import('../src/store.js');
   const base = { version: 2, migration: {}, tools: {} };
-  saveState({ ...base, effort: {
+  saveState({ ...base, effort: { 'gpt-5-6-luna': {
     model: 'gpt-5-6-luna', requested: null, gated: null, status: 200, at: Date.now() - 240000,
-  } });
+  } } });
   assert.equal(await run('status'), 0);
   assert.match(logs(), /effort\s+kenari\/gpt-5-6-luna requested=unset gated=unreported 200 4m ago/);
   output = [];
   assert.equal(await run('status', '--json'), 0);
   const json = JSON.parse(logs());
-  assert.deepEqual(json.effort, {
-    model: 'gpt-5-6-luna', requested: null, gated: null, status: 200, at: json.effort.at,
+  assert.deepEqual(json.effort['gpt-5-6-luna'], {
+    model: 'gpt-5-6-luna', requested: null, gated: null, status: 200,
+    at: json.effort['gpt-5-6-luna'].at,
   });
 
   output = [];
-  saveState({ ...base, effort: {
+  saveState({ ...base, effort: { 'gpt-5-6-luna': {
     model: 'gpt-5-6-luna', requested: 'max', gated: 'none', status: 200, at: Date.now(),
-  } });
+  } } });
   assert.equal(await run('status'), 0);
   assert.match(logs(), /effort\s+kenari\/gpt-5-6-luna requested=max gated=none 200 0s ago/);
 
   // A client that picked the none level must not read the same as one that picked
   // nothing at all. This is the pair the previous wording collapsed.
   output = [];
-  saveState({ ...base, effort: {
+  saveState({ ...base, effort: { 'gpt-5-6-luna': {
     model: 'gpt-5-6-luna', requested: 'none', gated: 'none', status: 200, at: Date.now(),
-  } });
+  } } });
   assert.equal(await run('status'), 0);
   assert.match(logs(), /requested=none gated=none/);
   assert.doesNotMatch(logs(), /requested=unset/);
@@ -577,6 +578,47 @@ test('native wrapper preserves original child exit code', async (t) => {
     );
     output = [];
     assert.equal(await run('claude', '--version'), 7);
+  } finally {
+    process.env.PATH = oldPath;
+  }
+});
+
+test('two slots on different models each report their own capability, aligned', async (t) => {
+  if (process.platform === 'win32') return t.skip('POSIX executable fixture');
+  process.env.KENARI_BASE_URL = await stubCatalog([
+    { id: 'aa', pricing: {}, reasoning_options: ['high', 'xhigh'] },
+    { id: 'bbbbbbbbbbbb', pricing: {}, reasoning_options: ['low', 'medium', 'high', 'xhigh', 'max'] },
+  ]);
+  process.env.KENARI_ALLOW_HTTP = '1';
+  const { setKey } = await import('../src/store.js');
+  setKey('kn-testkey123');
+  const bin = path.join(home, 'bin-two');
+  fs.mkdirSync(bin, { recursive: true });
+  fs.writeFileSync(path.join(bin, 'claude'), '#!/bin/sh\nexit 0\n', { mode: 0o755 });
+  const oldPath = process.env.PATH;
+  process.env.PATH = `${bin}${path.delimiter}${oldPath || ''}`;
+  try {
+    assert.equal(await run(
+      'configure', 'claude',
+      '--main', 'native', '--opus', 'kenari/aa', '--sonnet', 'kenari/bbbbbbbbbbbb',
+      '--haiku', 'native', '--fable', 'native', '--subagents', 'native', '--yes',
+    ), 0);
+    output = []; stdout = []; stderr = [];
+    assert.equal(await run('claude', '--version'), 0);
+    const rows = stderr.filter((line) => line.includes(' -> kenari/'));
+    assert.equal(rows.length, 2);
+    // Each slot reports ITS OWN model. Indexing the catalog instead of matching by id
+    // gives both rows the first model's levels, which a single-slot test cannot see.
+    const opus = rows.find((line) => line.includes('kenari/aa '));
+    const sonnet = rows.find((line) => line.includes('kenari/bbbbbbbbbbbb'));
+    assert.ok(opus.endsWith('effort high, xhigh'), opus);
+    assert.ok(sonnet.endsWith('effort low, medium, high, xhigh, max'), sonnet);
+    // The model column is padded to the widest id, so "effort" starts at one column.
+    assert.equal(opus.indexOf('effort'), sonnet.indexOf('effort'));
+    // Only the narrow model warns. The other advertises all five.
+    const warnings = stderr.filter((line) => line.includes('warning: Claude Code offers'));
+    assert.equal(warnings.length, 1);
+    assert.match(warnings[0], /aa advertises only/);
   } finally {
     process.env.PATH = oldPath;
   }

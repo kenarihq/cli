@@ -93,28 +93,54 @@ function validEffort(value) {
   };
 }
 
+// Keyed by model id. One global record could not answer the question the pre-launch
+// banner raises, since that banner lists every fixed slot and a session routes to more
+// than one model. Bounded so a long-lived install does not accumulate retired models.
+const EFFORT_KEEP = 8;
+
+function validEffortMap(value) {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return {};
+  const records = Object.values(value)
+    .map(validEffort)
+    .filter(Boolean)
+    .sort((a, b) => b.at - a.at)
+    .slice(0, EFFORT_KEEP);
+  return Object.fromEntries(records.map((record) => [record.model, record]));
+}
+
 export function loadState() {
   const parsed = readJson(statePath());
-  if (parsed?.version === 2) {
+  // No file means a fresh install, which is a version 2 install. Only an actual
+  // version 1 file on disk yields the version 1 shape. Defaulting the other way wrote
+  // a version 1 file on the first session, which made detectV1State true and sent the
+  // next launch through a migration that had nothing to migrate and dropped the record.
+  if (!parsed || parsed.version === 2) {
     return {
       version: 2,
-      migration: parsed.migration && typeof parsed.migration === 'object' ? parsed.migration : {},
+      migration: parsed?.migration && typeof parsed.migration === 'object' ? parsed.migration : {},
       tools: {},
-      effort: validEffort(parsed.effort),
+      effort: validEffortMap(parsed?.effort),
     };
   }
-  if (parsed && parsed.version && parsed.version !== 1) {
+  if (parsed.version && parsed.version !== 1) {
     throw new KenariError('state.json was written by a newer kenari CLI; upgrade this CLI or remove ~/.kenari/state.json');
   }
-  // Both branches carry effort. A fresh install has no state.json at all and lands
-  // here, on version 1, so leaving it off this branch would drop every record a new
-  // user's session wrote: the file would grow the key and the next read would discard it.
   return {
     version: 1,
-    tools: (parsed && typeof parsed.tools === 'object' && parsed.tools) || {},
-    migration_conflicts: Array.isArray(parsed?.migration_conflicts) ? parsed.migration_conflicts : [],
-    effort: validEffort(parsed?.effort),
+    tools: (typeof parsed.tools === 'object' && parsed.tools) || {},
+    migration_conflicts: Array.isArray(parsed.migration_conflicts) ? parsed.migration_conflicts : [],
+    effort: validEffortMap(parsed.effort),
   };
+}
+
+// Merge rather than replace, so two models in one session both survive, and so a
+// concurrent session's record for a different model is not clobbered. Same model from
+// two sessions is still last write wins, which is right for a diagnostic.
+export function recordEffort(record) {
+  const valid = validEffort(record);
+  if (!valid) return;
+  const state = loadState();
+  saveState({ ...state, effort: validEffortMap({ ...state.effort, [valid.model]: valid }) });
 }
 export function saveState(state) { writePrivateJson(statePath(), state); }
 export function getToolState(id) { return loadState().tools[id] || null; }

@@ -69,6 +69,12 @@ test('credentials and state files are 0600', async (t) => {
 
 test('tool state roundtrip', async () => {
   const { getToolState, setToolState, clearToolState } = await import('../src/store.js');
+  const { statePath } = await import('../src/paths.js');
+  // Legacy version 1 path, unreachable from src (setToolState and clearToolState have
+  // no callers there) and unavailable after the version 2 migration. A fresh install
+  // now reads as version 2, so this has to state its version 1 file explicitly.
+  fs.mkdirSync(path.dirname(statePath()), { recursive: true });
+  fs.writeFileSync(statePath(), '{"version":1,"tools":{}}');
   assert.equal(getToolState('claude'), null);
   setToolState('claude', { fileCreated: false, containerCreated: true, keys: {} });
   assert.deepEqual(getToolState('claude').keys, {});
@@ -137,30 +143,69 @@ test('version 2 effort record survives state roundtrip', async () => {
   const effort = {
     model: 'gpt-5-6-luna', requested: 'max', gated: 'xhigh', status: 200, at: 1754745600000,
   };
-  saveState({ version: 2, migration: {}, tools: {}, effort });
-  assert.deepEqual(loadState().effort, effort);
+  saveState({ version: 2, migration: {}, tools: {}, effort: { [effort.model]: effort } });
+  assert.deepEqual(loadState().effort[effort.model], effort);
 });
 
 test('effort record survives the roundtrip a fresh install actually takes', async () => {
   const { saveState, loadState } = await import('../src/store.js');
   const { statePath } = await import('../src/paths.js');
-  // No state.json yet, which is every new user. loadState returns the version 1 shape,
-  // so this is the path onEffort writes through in practice, not the version 2 one.
+  // No state.json yet, which is every new user. This is the path onEffort writes
+  // through in practice, so seeding a state first is exactly what hides bugs here.
   assert.equal(fs.existsSync(statePath()), false);
   const base = loadState();
-  assert.equal(base.version, 1);
+  // A fresh install is a version 2 install. Defaulting to 1 wrote a version 1 file on
+  // the first session, which made detectV1State true and sent the next launch through
+  // a migration that had nothing to migrate and dropped the record on the way.
+  assert.equal(base.version, 2);
   const effort = {
     model: 'glm-5-2', requested: 'max', gated: 'xhigh', status: 200, at: 1754745600000,
   };
-  saveState({ ...base, effort });
-  assert.deepEqual(loadState().effort, effort);
+  saveState({ ...base, effort: { [effort.model]: effort } });
+  assert.deepEqual(loadState().effort[effort.model], effort);
 });
 
 test('malformed version 2 effort record loads as null', async () => {
   const { loadState } = await import('../src/store.js');
   const { statePath } = await import('../src/paths.js');
   fs.mkdirSync(path.dirname(statePath()), { recursive: true });
-  fs.writeFileSync(statePath(), JSON.stringify({ version: 2, tools: {}, effort: { model: 42 } }));
+  fs.writeFileSync(statePath(), JSON.stringify({ version: 2, tools: {}, effort: { bad: { model: 42 } } }));
   assert.doesNotThrow(() => loadState());
-  assert.equal(loadState().effort, null);
+  assert.deepEqual(loadState().effort, {});
+});
+
+test('a fresh install does not fabricate a version 1 file that triggers migration', async () => {
+  const { loadState, recordEffort } = await import('../src/store.js');
+  const { detectV1State } = await import('../src/migrate.js');
+  const { statePath } = await import('../src/paths.js');
+  assert.equal(fs.existsSync(statePath()), false);
+  recordEffort({ model: 'glm-5-2', requested: 'max', gated: 'xhigh', status: 200, at: 1754745600000 });
+  // Writing a version 1 shape here made the NEXT launch run migrateV1, which rewrites
+  // state.json to version 2 and discards the record, so the fix has to hold across
+  // launches and not merely within one.
+  assert.equal(detectV1State(), null, 'must not look like a version 1 install');
+  assert.equal(loadState().effort['glm-5-2'].gated, 'xhigh');
+});
+
+test('effort records are per model, bounded, and merge across sessions', async () => {
+  const { loadState, recordEffort } = await import('../src/store.js');
+  recordEffort({ model: 'glm-5-2', requested: 'max', gated: 'xhigh', status: 200, at: 1000 });
+  recordEffort({ model: 'gpt-5-6-luna', requested: 'max', gated: 'max', status: 200, at: 2000 });
+  // Two slots at two models in one session: the second must not evict the first, which
+  // is what a single global record did.
+  const both = loadState().effort;
+  assert.equal(both['glm-5-2'].gated, 'xhigh');
+  assert.equal(both['gpt-5-6-luna'].gated, 'max');
+  // Same model again replaces rather than accumulates.
+  recordEffort({ model: 'glm-5-2', requested: 'low', gated: 'high', status: 200, at: 3000 });
+  assert.equal(Object.keys(loadState().effort).length, 2);
+  assert.equal(loadState().effort['glm-5-2'].requested, 'low');
+  // Bounded, keeping the most recent, so a long-lived install cannot grow without end.
+  for (let i = 0; i < 12; i += 1) {
+    recordEffort({ model: `m${i}`, requested: 'max', gated: 'max', status: 200, at: 10000 + i });
+  }
+  const kept = loadState().effort;
+  assert.equal(Object.keys(kept).length, 8);
+  assert.ok(kept.m11, 'newest kept');
+  assert.equal(kept['glm-5-2'], undefined, 'oldest evicted');
 });
