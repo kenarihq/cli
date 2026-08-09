@@ -11,6 +11,7 @@ import {
   loadState,
   maskKey,
   removeFile,
+  saveState,
   setKey,
   withLock,
 } from './store.js';
@@ -342,6 +343,21 @@ function cacheAge(cache) {
   return Math.max(0, Date.now() - Date.parse(cache.fetched_at));
 }
 
+function effortAge(at) {
+  const seconds = Math.max(0, Math.round((Date.now() - at) / 1000));
+  if (seconds < 60) return `${seconds}s ago`;
+  const minutes = Math.round(seconds / 60);
+  if (minutes < 60) return `${minutes}m ago`;
+  const hours = Math.round(minutes / 60);
+  if (hours < 24) return `${hours}h ago`;
+  return `${Math.round(hours / 24)}d ago`;
+}
+
+function effortSummary(effort) {
+  return `${effort.model} requested=${effort.requested ?? 'none'} `
+    + `gated=${effort.gated ?? 'unreported'} ${effort.status} ${effortAge(effort.at)}`;
+}
+
 function offlineStatus() {
   const config = loadConfig();
   const cache = loadCatalogCache();
@@ -365,6 +381,7 @@ function offlineStatus() {
       models: cache.models.length,
     } : null,
     migration_conflicts: [...storedMigrationConflicts(), ...detectOrphanedV1Signatures()],
+    effort: loadState().effort,
     tools,
   };
 }
@@ -428,6 +445,7 @@ async function cmdStatus(argv) {
   }
   console.log(`credential  ${status.credential}`);
   console.log(`catalog     ${status.cache ? `${status.cache.models} models, age ${Math.round(status.cache.age_ms / 1000)}s` : 'missing'}`);
+  if (status.effort) console.log(`effort      ${effortSummary(status.effort)}`);
   for (const conflict of status.migration_conflicts) {
     console.log(`conflict    ${conflict.tool}.${conflict.key}`);
   }
@@ -555,6 +573,12 @@ async function runTool(tool, args) {
         credential: key,
         catalog: cache,
         capabilityToken: tool === 'claude' ? randomBytes(32).toString('base64url') : null,
+        onEffort: (record) => {
+          try {
+            // Concurrent sessions may race. Last diagnostic record wins by design.
+            saveState({ ...loadState(), effort: record });
+          } catch {}
+        },
       },
       runtimeBuilder,
       runtimeOptions: { toolConfig, catalogPath },

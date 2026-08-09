@@ -200,6 +200,36 @@ test('status JSON is offline and never prints credential', async () => {
   assert.doesNotMatch(logs(), new RegExp(key));
 });
 
+test('status renders effort record and distinguishes unreported from none', async () => {
+  const { saveState } = await import('../src/store.js');
+  const base = { version: 2, migration: {}, tools: {} };
+  saveState({ ...base, effort: {
+    model: 'gpt-5-6-luna', requested: null, gated: null, status: 200, at: Date.now() - 240000,
+  } });
+  assert.equal(await run('status'), 0);
+  assert.match(logs(), /effort\s+gpt-5-6-luna requested=none gated=unreported 200 4m ago/);
+  output = [];
+  assert.equal(await run('status', '--json'), 0);
+  const json = JSON.parse(logs());
+  assert.deepEqual(json.effort, {
+    model: 'gpt-5-6-luna', requested: null, gated: null, status: 200, at: json.effort.at,
+  });
+
+  output = [];
+  saveState({ ...base, effort: {
+    model: 'gpt-5-6-luna', requested: 'max', gated: 'none', status: 200, at: Date.now(),
+  } });
+  assert.equal(await run('status'), 0);
+  assert.match(logs(), /effort\s+gpt-5-6-luna requested=max gated=none 200 0s ago/);
+});
+
+test('status omits effort when no record exists', async () => {
+  const { saveState } = await import('../src/store.js');
+  saveState({ version: 2, migration: {}, tools: {} });
+  assert.equal(await run('status'), 0);
+  assert.doesNotMatch(logs(), /^effort\s/m);
+});
+
 test('models JSON uses reasoning options and limits', async () => {
   process.env.KENARI_BASE_URL = await stubCatalog(CATALOG);
   process.env.KENARI_ALLOW_HTTP = '1';

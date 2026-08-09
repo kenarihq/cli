@@ -77,6 +77,22 @@ export function maskKey(key) {
   return key.slice(0, 6) + '...' + key.slice(-3);
 }
 
+function validEffort(value) {
+  if (!value || typeof value !== 'object' || Array.isArray(value)
+    || typeof value.model !== 'string'
+    || !(value.requested === null || typeof value.requested === 'string')
+    || !(value.gated === null || typeof value.gated === 'string')
+    || !Number.isInteger(value.status)
+    || !Number.isFinite(value.at)) return null;
+  return {
+    model: value.model,
+    requested: value.requested,
+    gated: value.gated,
+    status: value.status,
+    at: value.at,
+  };
+}
+
 export function loadState() {
   const parsed = readJson(statePath());
   if (parsed?.version === 2) {
@@ -84,6 +100,7 @@ export function loadState() {
       version: 2,
       migration: parsed.migration && typeof parsed.migration === 'object' ? parsed.migration : {},
       tools: {},
+      effort: validEffort(parsed.effort),
     };
   }
   if (parsed && parsed.version && parsed.version !== 1) {

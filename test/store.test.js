@@ -131,3 +131,21 @@ test('loadState normalizes missing tools', async () => {
   setToolState('x', { ok: true });
   assert.deepEqual(getToolState('x'), { ok: true });
 });
+
+test('version 2 effort record survives state roundtrip', async () => {
+  const { saveState, loadState } = await import('../src/store.js');
+  const effort = {
+    model: 'gpt-5-6-luna', requested: 'max', gated: 'xhigh', status: 200, at: 1754745600000,
+  };
+  saveState({ version: 2, migration: {}, tools: {}, effort });
+  assert.deepEqual(loadState().effort, effort);
+});
+
+test('malformed version 2 effort record loads as null', async () => {
+  const { loadState } = await import('../src/store.js');
+  const { statePath } = await import('../src/paths.js');
+  fs.mkdirSync(path.dirname(statePath()), { recursive: true });
+  fs.writeFileSync(statePath(), JSON.stringify({ version: 2, tools: {}, effort: { model: 42 } }));
+  assert.doesNotThrow(() => loadState());
+  assert.equal(loadState().effort, null);
+});
