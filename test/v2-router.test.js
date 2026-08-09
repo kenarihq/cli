@@ -250,7 +250,7 @@ test('router child strips eval-only parent arguments', () => {
 // gate. These go through startRouter, not startRouterServer, so the fork IPC is on the
 // path: a callback that never crosses the boundary would pass a direct-call test and do
 // nothing in a real session.
-async function effortRouter(t, { gatedHeader, status = 200 } = {}) {
+async function effortRouter(t, { gatedHeader, status = 200, pins } = {}) {
   const records = [];
   const seen = [];
   const nativeBase = await upstream(t, async (req, res) => {
@@ -270,6 +270,7 @@ async function effortRouter(t, { gatedHeader, status = 200 } = {}) {
     kenariBase,
     credential: 'kn-secret123',
     catalog: { models: [{ id: 'glm-5-2' }, { id: 'gpt-5-6-luna' }] },
+    effortPins: pins || {},
     onEffort: (record) => records.push(record),
   });
   t.after(() => router.close());
@@ -396,4 +397,73 @@ test('the change gate is per model, so alternating slots do not defeat it', asyn
   await settle();
   assert.equal(records.length, 2, 'one record per model, not one per alternation');
   assert.deepEqual(new Set(records.map((r) => r.model)), new Set(['glm-5-2', 'gpt-5-6-luna']));
+});
+
+// A pinned slot is a decision over (route, pin, client level). The reported symptom is
+// always one cell; the bug usually lives in a sibling, so every cell is asserted.
+test('effort pin matrix: route by pin by client level', async (t) => {
+  const cells = [
+    // route,    pin,    client, expected effort reaching the upstream
+    ['kenari', undefined, undefined, undefined],
+    ['kenari', undefined, 'low', 'low'],
+    ['kenari', 'max', undefined, 'max'],
+    ['kenari', 'max', 'low', 'max'],
+    ['native', 'max', undefined, undefined],
+    ['native', 'max', 'low', 'low'],
+  ];
+  for (const [route, pin, client, expected] of cells) {
+    const label = `${route} pin=${pin} client=${client}`;
+    const seen = [];
+    const nativeBase = await upstream(t, async (req, res) => {
+      seen.push(await collect(req));
+      res.writeHead(200, { 'content-type': 'application/json' });
+      res.end('{"ok":true}');
+    });
+    const kenariBase = await upstream(t, async (req, res) => {
+      seen.push(await collect(req));
+      res.writeHead(200, { 'content-type': 'application/json' });
+      res.end('{"ok":true}');
+    });
+    const router = await startRouter({
+      nativeBase,
+      kenariBase,
+      credential: 'kn-secret123',
+      catalog: { models: [{ id: 'glm-5-2' }] },
+      effortPins: pin ? { 'glm-5-2': pin } : {},
+    });
+    const body = { model: route === 'kenari' ? 'kenari/glm-5-2' : 'glm-5-2', max_tokens: 16 };
+    if (client) body.output_config = { effort: client };
+    await post(router, body);
+    await router.close();
+    assert.equal(seen.length, 1, label);
+    assert.equal(seen[0].output_config?.effort, expected, label);
+  }
+});
+
+test('a pin adds the level without disturbing the rest of the body', async (t) => {
+  const { router, seen } = await effortRouter(t, { gatedHeader: 'xhigh', pins: { 'glm-5-2': 'max' } });
+  const original = {
+    model: 'kenari/glm-5-2',
+    max_tokens: 16,
+    thinking: { type: 'adaptive' },
+    output_config: { format: { type: 'json_schema' } },
+  };
+  await post(router, original);
+  await settle();
+  const sent = JSON.parse(seen[0].raw.toString());
+  // The sibling key inside output_config survives; only effort is added.
+  assert.deepEqual(sent.output_config, { format: { type: 'json_schema' }, effort: 'max' });
+  assert.deepEqual(sent.thinking, { type: 'adaptive' });
+  assert.equal(sent.model, 'glm-5-2');
+});
+
+test('status records the pinned level, flagged as pinned', async (t) => {
+  const { router, records } = await effortRouter(t, { gatedHeader: 'xhigh', pins: { 'glm-5-2': 'max' } });
+  await post(router, { model: 'kenari/glm-5-2', max_tokens: 16, output_config: { effort: 'low' } });
+  await settle();
+  // The session asked for low and the pin overrode it. requested reports what the
+  // upstream actually received, and the flag says why, so the two never silently differ.
+  assert.equal(records[0].requested, 'max');
+  assert.equal(records[0].pinned, true);
+  assert.equal(records[0].gated, 'xhigh');
 });

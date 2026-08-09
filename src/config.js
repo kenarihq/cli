@@ -27,7 +27,7 @@ function validateRole(tool, role, value) {
     fail(`${tool}.${role} must be an object`);
   }
   const keys = Object.keys(value);
-  if (keys.some((key) => !['mode', 'model'].includes(key))) {
+  if (keys.some((key) => !['mode', 'model', 'effort'].includes(key))) {
     fail(`${tool}.${role} contains an unknown field`);
   }
   if (!ROLE_DEFINITIONS[tool][role].includes(value.mode)) {
@@ -40,9 +40,19 @@ function validateRole(tool, role, value) {
   } else if ('model' in value) {
     fail(`${tool}.${role} may specify model only in fixed mode`);
   }
-  return value.mode === 'fixed'
-    ? { mode: 'fixed', model: value.model }
-    : { mode: value.mode };
+  // Not checked against a level list. The vocabulary is the gateway's and it is open,
+  // seven levels in production including minimal, so a client-side allowlist would
+  // reject levels that work. The gateway clamps what a model cannot do.
+  if ('effort' in value) {
+    if (value.mode !== 'fixed') fail(`${tool}.${role} may pin effort only in fixed mode`);
+    if (typeof value.effort !== 'string' || !value.effort.trim()) {
+      fail(`${tool}.${role} effort must be a non-empty string`);
+    }
+  }
+  if (value.mode !== 'fixed') return { mode: value.mode };
+  const fixed = { mode: 'fixed', model: value.model };
+  if ('effort' in value) fixed.effort = value.effort.trim();
+  return fixed;
 }
 
 export function validateConfig(value) {

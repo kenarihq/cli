@@ -90,6 +90,7 @@ async function startRouterServer(options) {
   const bodyLimit = options.bodyLimit ?? 64 * 1024 * 1024;
   const sockets = new Set();
   const onEffort = typeof options.onEffort === 'function' ? options.onEffort : null;
+  const effortPins = new Map(Object.entries(options.effortPins || {}));
   // Keyed by model, not one shared key. Claude Code alternates slots inside a session,
   // sonnet for the work and haiku for background tasks, so a single key would see every
   // alternation as a change and report on every request for the whole session.
@@ -97,21 +98,24 @@ async function startRouterServer(options) {
 
   // Observe only. The gateway owns clamping and stripping and has a tested matrix for
   // it; a router that adjusted the level here would make this record a lie.
-  function recordEffort(upstreamRes, body, model) {
-    const asked = body?.output_config?.effort;
+  function recordEffort(upstreamRes, body, model, pinned) {
+    const asked = pinned ?? body?.output_config?.effort;
     const stamped = upstreamRes.headers['x-kenari-gated-effort'];
-    // Both stay verbatim. The level vocabulary is open (production advertises seven,
-    // including minimal), so validating or normalizing here would drop real values.
+    // requested is what the upstream actually received, so a pin reports the pinned
+    // level rather than what the session happened to send. The flag keeps the two
+    // distinguishable, because a status line that silently disagreed with the client
+    // is the confusion this whole feature exists to remove.
     const requested = typeof asked === 'string' ? asked : null;
     const gated = typeof stamped === 'string' ? stamped : null;
     const status = upstreamRes.statusCode || 0;
     // Three primitive compares, on a proxy that sees every request of a session. The
     // record and its timestamp are built only when something actually changed, so an
     // unchanged response costs no allocation and no serialization.
+    const isPinned = typeof pinned === 'string';
     const last = lastEffort.get(model);
     if (last && last.requested === requested && last.gated === gated && last.status === status) return;
     lastEffort.set(model, { requested, gated, status });
-    try { onEffort({ model, requested, gated, status, at: Date.now() }); } catch {}
+    try { onEffort({ model, requested, gated, status, pinned: isPinned, at: Date.now() }); } catch {}
   }
 
   const server = http.createServer(async (req, res) => {
@@ -150,7 +154,23 @@ async function startRouterServer(options) {
 
     const target = isKenari ? kenariBase : nativeBase;
     const outgoing = { ...(body || {}) };
-    if (isKenari) outgoing.model = id;
+    // A pinned slot wins over whatever the session sent. Claude Code's effort is a
+    // single session-wide setting, so a user running a native orchestrator that
+    // delegates to a Kenari slot has no way to ask for a level on that slot alone.
+    // The pin is that missing control, and it is the user's own configuration, not the
+    // router second-guessing a request. Native routes are never touched.
+    let pinned;
+    if (isKenari) {
+      outgoing.model = id;
+      pinned = effortPins.get(id);
+      if (pinned) {
+        const config = outgoing.output_config;
+        outgoing.output_config = {
+          ...(config && typeof config === 'object' && !Array.isArray(config) ? config : {}),
+          effort: pinned,
+        };
+      }
+    }
     const raised = isKenari ? compatibilityLimit(model, outgoing, options.compatibility) : null;
     if (raised !== null) {
       if ('max_output_tokens' in outgoing) outgoing.max_output_tokens = raised;
@@ -177,7 +197,7 @@ async function startRouterServer(options) {
     }, (upstreamRes) => {
       const responseHeaders = safeHeaders(upstreamRes.headers, RESPONSE_STRIP);
       res.writeHead(upstreamRes.statusCode || 502, responseHeaders);
-      if (onEffort && isKenari) recordEffort(upstreamRes, body, id);
+      if (onEffort && isKenari) recordEffort(upstreamRes, body, id, pinned);
       const terminateDownstream = (error) => {
         if (!res.destroyed) res.destroy(error);
       };
@@ -299,6 +319,7 @@ export async function startRouter(options) {
         capabilityToken: options.capabilityToken || null,
         bodyLimit: options.bodyLimit,
         compatibility: options.compatibility || null,
+        effortPins: options.effortPins || null,
         debug: typeof options.debug === 'function',
         onEffort: typeof options.onEffort === 'function',
       },

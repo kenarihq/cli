@@ -141,7 +141,7 @@ test('loadState normalizes missing tools', async () => {
 test('version 2 effort record survives state roundtrip', async () => {
   const { saveState, loadState } = await import('../src/store.js');
   const effort = {
-    model: 'gpt-5-6-luna', requested: 'max', gated: 'xhigh', status: 200, at: 1754745600000,
+    model: 'gpt-5-6-luna', requested: 'max', gated: 'xhigh', status: 200, pinned: false, at: 1754745600000,
   };
   saveState({ version: 2, migration: {}, tools: {}, effort: { [effort.model]: effort } });
   assert.deepEqual(loadState().effort[effort.model], effort);
@@ -159,7 +159,7 @@ test('effort record survives the roundtrip a fresh install actually takes', asyn
   // a migration that had nothing to migrate and dropped the record on the way.
   assert.equal(base.version, 2);
   const effort = {
-    model: 'glm-5-2', requested: 'max', gated: 'xhigh', status: 200, at: 1754745600000,
+    model: 'glm-5-2', requested: 'max', gated: 'xhigh', status: 200, pinned: false, at: 1754745600000,
   };
   saveState({ ...base, effort: { [effort.model]: effort } });
   assert.deepEqual(loadState().effort[effort.model], effort);

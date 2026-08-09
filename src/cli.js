@@ -173,7 +173,23 @@ async function pickFixedModel(tool, role, current) {
   let defaultIndex = cache.models.findIndex((model) => `kenari/${model.id}` === currentId);
   if (defaultIndex < 0) defaultIndex = 0;
   const selected = await pickNumber(`${tool}: ${role}`, items, defaultIndex);
-  return { mode: 'fixed', model: `kenari/${cache.models[selected].id}` };
+  const picked = cache.models[selected];
+  const chosen = { mode: 'fixed', model: `kenari/${picked.id}` };
+  // Offered per slot because Claude Code's effort is one session-wide setting, which
+  // cannot express "this level on the delegated slot only".
+  const advertised = picked.reasoning_options;
+  if (advertised === null || advertised.length) {
+    const known = advertised === null
+      ? 'gateway reports no capability'
+      : advertised.join(', ');
+    const prior = current?.mode === 'fixed' && current.model === chosen.model ? current.effort : undefined;
+    const answer = (await ask(
+      `${tool}: ${role} effort [Enter = ${prior || 'let the session decide'}; ${known}]: `,
+    )).trim();
+    const pin = answer === '' ? prior : (answer.toLowerCase() === 'none' ? undefined : answer);
+    if (pin) chosen.effort = pin;
+  }
+  return chosen;
 }
 
 async function configureAdvanced(tool, current) {
@@ -298,7 +314,19 @@ async function cmdConfigure(argv) {
         throw new KenariError(`--yes requires every ${tool} role; missing --${missing.join(', --')}`);
       }
       roles = {};
-      for (const role of roleIds) roles[role] = parseRoleValue(tool, role, flags[role]);
+      for (const role of roleIds) {
+        roles[role] = parseRoleValue(tool, role, flags[role]);
+        const pin = flags[`${role}-effort`];
+        if (pin !== undefined) {
+          if (roles[role].mode !== 'fixed') {
+            throw new KenariError(`--${role}-effort needs --${role} set to a kenari/<model-id>`);
+          }
+          if (typeof pin !== 'string' || !pin.trim()) {
+            throw new KenariError(`--${role}-effort needs a level, for example max`);
+          }
+          roles[role].effort = pin.trim();
+        }
+      }
     } else {
       if (!isTTY()) throw new KenariError('non-interactive configuration requires --yes and every role');
       const advanced = await askYesNo(`Use advanced ${tool} role configuration?`, false);
@@ -355,7 +383,8 @@ function effortSummary(effort) {
   // client can pick and a gateway can apply. "unset" is a client that sent no level,
   // "unreported" is a gateway that sent no header, and both differ from "none".
   // The kenari/ prefix matches how the model is named everywhere else the user sees it.
-  return `kenari/${effort.model} requested=${effort.requested ?? 'unset'} `
+  const asked = effort.requested === null ? 'unset' : effort.requested + (effort.pinned ? ' (pinned)' : '');
+  return `kenari/${effort.model} requested=${asked} `
     + `gated=${effort.gated ?? 'unreported'} ${effort.status} ${formatAge(Date.now() - effort.at)} ago`;
 }
 
@@ -548,16 +577,22 @@ function printEffortCapabilities(tool, toolConfig, cache) {
     .filter(([, role]) => role.mode === 'fixed')
     .map(([slot, role]) => {
       const modelId = role.model.slice('kenari/'.length);
-      return { slot, modelId, model: cache?.models.find((item) => item.id === modelId) };
+      return {
+        slot,
+        modelId,
+        pin: role.effort,
+        model: cache?.models.find((item) => item.id === modelId),
+      };
     });
   if (!fixed.length) return;
   const slotWidth = Math.max(...fixed.map(({ slot }) => slot.length));
   const modelWidth = Math.max(...fixed.map(({ modelId }) => `kenari/${modelId}`.length));
-  for (const { slot, modelId, model } of fixed) {
-    const effort = formatEffortOptions(
+  for (const { slot, modelId, model, pin } of fixed) {
+    const advertised = formatEffortOptions(
       model?.reasoning_options,
       'unknown (gateway reports no capability)',
     );
+    const effort = pin ? `${pin} (pinned; model offers ${advertised})` : advertised;
     console.error(
       `kenari: ${slot.padEnd(slotWidth)} -> ${`kenari/${modelId}`.padEnd(modelWidth)}  effort ${effort}`,
     );
@@ -569,10 +604,19 @@ function printEffortCapabilities(tool, toolConfig, cache) {
   // Once per model, not once per slot. A user routing six slots at one model was
   // getting the same three lines six times.
   const warned = new Set();
-  for (const { modelId, model } of fixed) {
+  for (const { modelId, model, pin } of fixed) {
     const options = model?.reasoning_options;
     if (!Array.isArray(options) || !options.length || warned.has(modelId)) continue;
     const advertised = new Set(options);
+    // A pinned slot ignores the session entirely, so the five-level mismatch is moot.
+    // What matters instead is whether the model can honor the pin.
+    if (pin) {
+      if (advertised.has(pin)) continue;
+      warned.add(modelId);
+      console.error(`kenari: warning: ${modelId} does not advertise ${pin}, only ${options.join(', ')},`);
+      console.error('        so the gateway adjusts it. Run kenari status to see which level was applied.');
+      continue;
+    }
     if (CLAUDE_EFFORT_LEVELS.every((level) => advertised.has(level))) continue;
     warned.add(modelId);
     console.error(`kenari: warning: Claude Code offers low through max; ${modelId} advertises only`);
@@ -624,6 +668,11 @@ async function runTool(tool, args) {
         credential: key,
         catalog: cache,
         capabilityToken: tool === 'claude' ? randomBytes(32).toString('base64url') : null,
+        effortPins: Object.fromEntries(
+          Object.values(toolConfig.roles)
+            .filter((role) => role.mode === 'fixed' && role.effort)
+            .map((role) => [role.model.slice('kenari/'.length), role.effort]),
+        ),
         // Diagnostic, never load bearing: a failed write must not disturb the session,
         // and nothing is printed because the tool owns the terminal from here.
         onEffort: (record) => { recordEffort(record).catch(() => {}); },

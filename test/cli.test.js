@@ -309,7 +309,7 @@ test('status renders effort record and distinguishes unreported from none', asyn
   assert.equal(await run('status', '--json'), 0);
   const json = JSON.parse(logs());
   assert.deepEqual(json.effort['gpt-5-6-luna'], {
-    model: 'gpt-5-6-luna', requested: null, gated: null, status: 200,
+    model: 'gpt-5-6-luna', requested: null, gated: null, status: 200, pinned: false,
     at: json.effort['gpt-5-6-luna'].at,
   });
 
@@ -680,4 +680,77 @@ test('a launch that dies on a bad environment prints no capability advice first'
     process.env.PATH = oldPath;
     delete process.env.ANTHROPIC_BASE_URL;
   }
+});
+
+test('configure pins effort per slot and refuses it on a native slot', async () => {
+  process.env.KENARI_BASE_URL = await stubCatalog(CATALOG);
+  process.env.KENARI_ALLOW_HTTP = '1';
+  const { setKey } = await import('../src/store.js');
+  setKey('kn-testkey123');
+  assert.equal(await run(
+    'configure', 'claude',
+    '--main', 'native', '--opus', 'native', '--sonnet', 'kenari/glm-5-2', '--sonnet-effort', 'xhigh',
+    '--haiku', 'native', '--fable', 'native', '--subagents', 'native', '--yes',
+  ), 0);
+  const config = JSON.parse(fs.readFileSync(path.join(process.env.KENARI_HOME, 'config.json'), 'utf8'));
+  assert.deepEqual(config.tools.claude.roles.sonnet, {
+    mode: 'fixed', model: 'kenari/glm-5-2', effort: 'xhigh',
+  });
+  // A native slot never reaches the gateway, so pinning one is a mistake worth naming.
+  output = [];
+  assert.equal(await run(
+    'configure', 'claude',
+    '--main', 'native', '--opus', 'native', '--sonnet', 'native', '--sonnet-effort', 'max',
+    '--haiku', 'native', '--fable', 'native', '--subagents', 'native', '--yes',
+  ), 1);
+  assert.match(logs(), /--sonnet-effort needs --sonnet set to a kenari/);
+});
+
+test('the launch banner shows a pinned slot and warns only when the model cannot honor it', async (t) => {
+  if (process.platform === 'win32') return t.skip('POSIX executable fixture');
+  process.env.KENARI_BASE_URL = await stubCatalog([
+    { id: 'narrow', pricing: {}, reasoning_options: ['high', 'xhigh'] },
+  ]);
+  process.env.KENARI_ALLOW_HTTP = '1';
+  const { setKey } = await import('../src/store.js');
+  setKey('kn-testkey123');
+  const bin = path.join(home, 'bin-pin');
+  fs.mkdirSync(bin, { recursive: true });
+  fs.writeFileSync(path.join(bin, 'claude'), '#!/bin/sh\nexit 0\n', { mode: 0o755 });
+  const oldPath = process.env.PATH;
+  process.env.PATH = `${bin}${path.delimiter}${oldPath || ''}`;
+  try {
+    // xhigh is advertised, so the pin is honored and there is nothing to warn about.
+    assert.equal(await run(
+      'configure', 'claude',
+      '--main', 'native', '--opus', 'native', '--sonnet', 'kenari/narrow', '--sonnet-effort', 'xhigh',
+      '--haiku', 'native', '--fable', 'native', '--subagents', 'native', '--yes',
+    ), 0);
+    output = []; stdout = []; stderr = [];
+    assert.equal(await run('claude', '--version'), 0);
+    assert.match(stderrLogs(), /sonnet -> kenari\/narrow\s+effort xhigh \(pinned; model offers high, xhigh\)/);
+    // The five-level session mismatch is moot once a slot is pinned.
+    assert.doesNotMatch(stderrLogs(), /Claude Code offers low through max/);
+
+    // max is not advertised, so the gateway will adjust it and the user should know.
+    assert.equal(await run(
+      'configure', 'claude',
+      '--main', 'native', '--opus', 'native', '--sonnet', 'kenari/narrow', '--sonnet-effort', 'max',
+      '--haiku', 'native', '--fable', 'native', '--subagents', 'native', '--yes',
+    ), 0);
+    output = []; stdout = []; stderr = [];
+    assert.equal(await run('claude', '--version'), 0);
+    assert.match(stderrLogs(), /narrow does not advertise max, only high, xhigh/);
+  } finally {
+    process.env.PATH = oldPath;
+  }
+});
+
+test('status marks a pinned level so it never silently disagrees with the session', async () => {
+  const { saveState } = await import('../src/store.js');
+  saveState({ version: 2, migration: {}, tools: {}, effort: { 'glm-5-2': {
+    model: 'glm-5-2', requested: 'max', gated: 'xhigh', status: 200, pinned: true, at: Date.now(),
+  } } });
+  assert.equal(await run('status'), 0);
+  assert.match(logs(), /effort\s+kenari\/glm-5-2 requested=max \(pinned\) gated=xhigh 200/);
 });
