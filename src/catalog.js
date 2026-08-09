@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 import { modelCachePath } from './paths.js';
 import { fetchCatalog, validateGatewayUrl } from './gateway.js';
 import { KenariError, readJson, writeFileAtomic, writePrivateJson } from './store.js';

@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 import { KenariError } from '../store.js';
 
 export const CLAUDE_ROLE_ENV = Object.freeze({

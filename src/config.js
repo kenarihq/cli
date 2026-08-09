@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 import { configPath } from './paths.js';
 import { KenariError, readJson, writePrivateJson } from './store.js';
 

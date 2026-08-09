@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 import { spawnSync } from 'node:child_process';
 import { KenariError } from '../store.js';
 

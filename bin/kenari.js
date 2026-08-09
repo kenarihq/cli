@@ -1,4 +1,5 @@
 #!/usr/bin/env node
+// SPDX-License-Identifier: GPL-3.0-or-later
 import { main } from '../src/cli.js';
 // Flush stdout before exiting so piped output is never truncated, then exit
 // explicitly: a kept-alive fetch socket would otherwise hold the process open

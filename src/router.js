@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 import http from 'node:http';
 import https from 'node:https';
 import { fork } from 'node:child_process';

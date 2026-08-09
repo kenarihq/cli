@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 import fs from 'node:fs';
 import path from 'node:path';
 import { backupsDir, claudeSettingsPath, codexConfigPath, statePath } from './paths.js';
