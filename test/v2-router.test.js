@@ -245,3 +245,141 @@ test('router child strips eval-only parent arguments', () => {
     ['--trace-warnings', '--no-warnings'],
   );
 });
+
+// The gateway stamps x-kenari-gated-effort with the level that survived its capability
+// gate. These go through startRouter, not startRouterServer, so the fork IPC is on the
+// path: a callback that never crosses the boundary would pass a direct-call test and do
+// nothing in a real session.
+async function effortRouter(t, { gatedHeader, status = 200 } = {}) {
+  const records = [];
+  const seen = [];
+  const nativeBase = await upstream(t, async (req, res) => {
+    seen.push({ route: 'native', raw: await collectRaw(req) });
+    res.writeHead(200, { 'content-type': 'application/json' });
+    res.end('{"ok":true}');
+  });
+  const kenariBase = await upstream(t, async (req, res) => {
+    seen.push({ route: 'kenari', raw: await collectRaw(req) });
+    const headers = { 'content-type': 'application/json' };
+    if (gatedHeader) headers['x-kenari-gated-effort'] = gatedHeader;
+    res.writeHead(status, headers);
+    res.end('{"ok":true}');
+  });
+  const router = await startRouter({
+    nativeBase,
+    kenariBase,
+    credential: 'kn-secret123',
+    catalog: { models: [{ id: 'glm-5-2' }, { id: 'gpt-5-6-luna' }] },
+    onEffort: (record) => records.push(record),
+  });
+  t.after(() => router.close());
+  return { router, records, seen };
+}
+
+function post(router, body) {
+  return fetch(router.url + '/v1/messages', {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify(body),
+  });
+}
+
+// A record only means something if both halves survive the fork, so settle rather than
+// racing the IPC.
+async function settle() {
+  for (let i = 0; i < 40; i += 1) await new Promise((r) => setTimeout(r, 25));
+}
+
+test('router records the level asked for beside the level the gateway applied', async (t) => {
+  // glm-5-2 advertises high and xhigh only, so a request for max comes back clamped.
+  const { router, records } = await effortRouter(t, { gatedHeader: 'xhigh' });
+  await post(router, {
+    model: 'kenari/glm-5-2',
+    max_tokens: 16,
+    thinking: { type: 'adaptive' },
+    output_config: { effort: 'max' },
+  });
+  await settle();
+  assert.equal(records.length, 1);
+  assert.equal(records[0].model, 'glm-5-2');
+  assert.equal(records[0].requested, 'max');
+  assert.equal(records[0].gated, 'xhigh');
+  assert.equal(records[0].status, 200);
+  assert.ok(Number.isFinite(records[0].at));
+});
+
+test('router distinguishes an absent header from an absent request level', async (t) => {
+  const { router, records } = await effortRouter(t);
+  await post(router, {
+    model: 'kenari/glm-5-2',
+    max_tokens: 16,
+    output_config: { effort: 'max' },
+  });
+  await settle();
+  // No header is not the same as a header reading none: the first means the gateway
+  // applied nothing, the second means it applied the none level.
+  assert.equal(records[0].requested, 'max');
+  assert.equal(records[0].gated, null);
+
+  await post(router, { model: 'kenari/gpt-5-6-luna', max_tokens: 16 });
+  await settle();
+  assert.equal(records[1].requested, null);
+  assert.equal(records[1].gated, null);
+});
+
+test('router records a non-200 rather than dropping it', async (t) => {
+  const { router, records } = await effortRouter(t, { status: 503 });
+  await post(router, {
+    model: 'kenari/glm-5-2', max_tokens: 16, output_config: { effort: 'low' },
+  });
+  await settle();
+  assert.equal(records.length, 1);
+  assert.equal(records[0].status, 503);
+  assert.equal(records[0].requested, 'low');
+});
+
+test('router reports an effort change, not every request', async (t) => {
+  const { router, records } = await effortRouter(t, { gatedHeader: 'xhigh' });
+  const body = {
+    model: 'kenari/glm-5-2', max_tokens: 16, output_config: { effort: 'max' },
+  };
+  for (let i = 0; i < 3; i += 1) await post(router, body);
+  await settle();
+  assert.equal(records.length, 1, 'three identical requests are one record');
+
+  await post(router, { ...body, output_config: { effort: 'low' } });
+  await settle();
+  assert.equal(records.length, 2, 'a changed level opens a new record');
+  assert.equal(records[1].requested, 'low');
+});
+
+test('router records nothing for a native route', async (t) => {
+  const { router, records } = await effortRouter(t, { gatedHeader: 'max' });
+  await post(router, { model: 'gpt-5-6-luna', max_tokens: 16, output_config: { effort: 'max' } });
+  await settle();
+  assert.equal(records.length, 0);
+});
+
+test('recording the effort does not disturb what is forwarded', async (t) => {
+  const { router, seen } = await effortRouter(t, { gatedHeader: 'xhigh' });
+  const nativeBody = '{ "model": "gpt-5-6-luna", "output_config": { "effort": "max" } }\n';
+  await fetch(router.url + '/v1/messages', {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: nativeBody,
+  });
+  // Native is byte for byte, whitespace and all.
+  assert.equal(seen[0].raw.toString(), nativeBody);
+
+  const original = {
+    model: 'kenari/glm-5-2',
+    max_tokens: 16,
+    thinking: { type: 'adaptive' },
+    output_config: { effort: 'max' },
+  };
+  await post(router, original);
+  await settle();
+  // Kenari differs only in the model id. The level rides through untouched: the CLI
+  // never clamps, strips, or injects, or the recorded pair would be a lie.
+  assert.deepEqual(JSON.parse(seen[1].raw.toString()), { ...original, model: 'glm-5-2' });
+});
