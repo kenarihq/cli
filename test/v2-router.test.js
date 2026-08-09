@@ -383,3 +383,17 @@ test('recording the effort does not disturb what is forwarded', async (t) => {
   // never clamps, strips, or injects, or the recorded pair would be a lie.
   assert.deepEqual(JSON.parse(seen[1].raw.toString()), { ...original, model: 'glm-5-2' });
 });
+
+test('the change gate is per model, so alternating slots do not defeat it', async (t) => {
+  // Claude Code alternates slots inside one session: sonnet for the work, haiku for
+  // background tasks. With a single shared gate, A B A B looks like four changes and
+  // writes on every request for the whole session.
+  const { router, records } = await effortRouter(t, { gatedHeader: 'xhigh' });
+  for (let i = 0; i < 3; i += 1) {
+    await post(router, { model: 'kenari/glm-5-2', max_tokens: 16, output_config: { effort: 'max' } });
+    await post(router, { model: 'kenari/gpt-5-6-luna', max_tokens: 16, output_config: { effort: 'max' } });
+  }
+  await settle();
+  assert.equal(records.length, 2, 'one record per model, not one per alternation');
+  assert.deepEqual(new Set(records.map((r) => r.model)), new Set(['glm-5-2', 'gpt-5-6-luna']));
+});

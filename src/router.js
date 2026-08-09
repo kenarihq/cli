@@ -89,7 +89,10 @@ async function startRouterServer(options) {
   const bodyLimit = options.bodyLimit ?? 64 * 1024 * 1024;
   const sockets = new Set();
   const onEffort = typeof options.onEffort === 'function' ? options.onEffort : null;
-  let lastEffortKey = null;
+  // Keyed by model, not one shared key. Claude Code alternates slots inside a session,
+  // sonnet for the work and haiku for background tasks, so a single key would see every
+  // alternation as a change and report on every request for the whole session.
+  const lastEffortKey = new Map();
 
   // Observe only. The gateway owns clamping and stripping and has a tested matrix for
   // it; a router that adjusted the level here would make this record a lie.
@@ -105,8 +108,8 @@ async function startRouterServer(options) {
       status: upstreamRes.statusCode || 0,
     };
     const key = JSON.stringify(record);
-    if (key === lastEffortKey) return;
-    lastEffortKey = key;
+    if (lastEffortKey.get(model) === key) return;
+    lastEffortKey.set(model, key);
     try { onEffort({ ...record, at: Date.now() }); } catch {}
   }
 

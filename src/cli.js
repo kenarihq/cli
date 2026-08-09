@@ -542,6 +542,50 @@ async function ensureConfigured(tool) {
   return { config, toolConfig: getToolConfig(config, tool) };
 }
 
+// Claude Code's /effort offers these five for every model, regardless of what the
+// model can actually do. That mismatch is what the warning below is about.
+const CLAUDE_EFFORT_LEVELS = ['low', 'medium', 'high', 'xhigh', 'max'];
+
+function printEffortCapabilities(tool, toolConfig, cache) {
+  const fixed = Object.entries(toolConfig.roles)
+    .filter(([, role]) => role.mode === 'fixed')
+    .map(([slot, role]) => {
+      const modelId = role.model.slice('kenari/'.length);
+      return { slot, modelId, model: cache?.models.find((item) => item.id === modelId) };
+    });
+  if (!fixed.length) return;
+  const slotWidth = Math.max(...fixed.map(({ slot }) => slot.length));
+  const modelWidth = Math.max(...fixed.map(({ modelId }) => `kenari/${modelId}`.length));
+  for (const { slot, modelId, model } of fixed) {
+    const options = model?.reasoning_options;
+    const effort = options === null || options === undefined
+      ? 'unknown (gateway reports no capability)'
+      : options.length
+        ? options.join(', ')
+        : 'unsupported';
+    console.error(
+      `kenari: ${slot.padEnd(slotWidth)} -> ${`kenari/${modelId}`.padEnd(modelWidth)}  effort ${effort}`,
+    );
+  }
+  // Codex reads its levels from the catalog we generate, so its picker already offers
+  // exactly what the model advertises and nothing can narrow. Only Claude Code shows a
+  // fixed five regardless of the model.
+  if (tool !== 'claude') return;
+  // Once per model, not once per slot. A user routing six slots at one model was
+  // getting the same three lines six times.
+  const warned = new Set();
+  for (const { modelId, model } of fixed) {
+    const options = model?.reasoning_options;
+    if (!Array.isArray(options) || !options.length || warned.has(modelId)) continue;
+    const advertised = new Set(options);
+    if (CLAUDE_EFFORT_LEVELS.every((level) => advertised.has(level))) continue;
+    warned.add(modelId);
+    console.error(`kenari: warning: Claude Code offers low through max; ${modelId} advertises only`);
+    console.error(`        ${options.join(', ')}, so the gateway adjusts the rest. Run kenari status to see`);
+    console.error('        which level was applied.');
+  }
+}
+
 async function runTool(tool, args) {
   const { config, toolConfig } = await ensureConfigured(tool);
   const requireKenari = hasKenariRoutes(config, tool);
