@@ -106,10 +106,14 @@ export function loadState() {
   if (parsed && parsed.version && parsed.version !== 1) {
     throw new KenariError('state.json was written by a newer kenari CLI; upgrade this CLI or remove ~/.kenari/state.json');
   }
+  // Both branches carry effort. A fresh install has no state.json at all and lands
+  // here, on version 1, so leaving it off this branch would drop every record a new
+  // user's session wrote: the file would grow the key and the next read would discard it.
   return {
     version: 1,
     tools: (parsed && typeof parsed.tools === 'object' && parsed.tools) || {},
     migration_conflicts: Array.isArray(parsed?.migration_conflicts) ? parsed.migration_conflicts : [],
+    effort: validEffort(parsed?.effort),
   };
 }
 export function saveState(state) { writePrivateJson(statePath(), state); }

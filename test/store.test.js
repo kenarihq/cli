@@ -141,6 +141,21 @@ test('version 2 effort record survives state roundtrip', async () => {
   assert.deepEqual(loadState().effort, effort);
 });
 
+test('effort record survives the roundtrip a fresh install actually takes', async () => {
+  const { saveState, loadState } = await import('../src/store.js');
+  const { statePath } = await import('../src/paths.js');
+  // No state.json yet, which is every new user. loadState returns the version 1 shape,
+  // so this is the path onEffort writes through in practice, not the version 2 one.
+  assert.equal(fs.existsSync(statePath()), false);
+  const base = loadState();
+  assert.equal(base.version, 1);
+  const effort = {
+    model: 'glm-5-2', requested: 'max', gated: 'xhigh', status: 200, at: 1754745600000,
+  };
+  saveState({ ...base, effort });
+  assert.deepEqual(loadState().effort, effort);
+});
+
 test('malformed version 2 effort record loads as null', async () => {
   const { loadState } = await import('../src/store.js');
   const { statePath } = await import('../src/paths.js');
