@@ -214,6 +214,67 @@ test('status JSON is offline and never prints credential', async () => {
   assert.doesNotMatch(logs(), new RegExp(key));
 });
 
+test('the narrowing warning is per model, not per slot, and names the right tool', async (t) => {
+  if (process.platform === 'win32') return t.skip('POSIX executable fixture');
+  process.env.KENARI_BASE_URL = await stubCatalog([
+    { id: 'narrow', pricing: {}, reasoning_options: ['high', 'xhigh'] },
+  ]);
+  process.env.KENARI_ALLOW_HTTP = '1';
+  const { setKey } = await import('../src/store.js');
+  setKey('kn-testkey123');
+  const bin = path.join(home, 'bin-many');
+  fs.mkdirSync(bin, { recursive: true });
+  fs.writeFileSync(path.join(bin, 'claude'), '#!/bin/sh\nexit 0\n', { mode: 0o755 });
+  const oldPath = process.env.PATH;
+  process.env.PATH = `${bin}${path.delimiter}${oldPath || ''}`;
+  try {
+    // The real shape: a user routing every slot at one model, not the one-slot mockup.
+    assert.equal(await run(
+      'configure', 'claude',
+      '--main', 'kenari/narrow', '--opus', 'kenari/narrow', '--sonnet', 'kenari/narrow',
+      '--haiku', 'kenari/narrow', '--fable', 'kenari/narrow', '--subagents', 'kenari/narrow',
+      '--yes',
+    ), 0);
+    output = []; stdout = []; stderr = [];
+    assert.equal(await run('claude', '--version'), 0);
+    const lines = stderr.filter((line) => line.includes('warning: Claude Code offers'));
+    assert.equal(lines.length, 1, 'one warning for the model, not one per slot');
+    // Every slot still gets its own capability line: that part is per slot by design.
+    assert.equal(stderr.filter((line) => line.includes('effort high, xhigh')).length, 6);
+  } finally {
+    process.env.PATH = oldPath;
+  }
+});
+
+test('the narrowing warning names Codex when Codex is what is launching', async (t) => {
+  if (process.platform === 'win32') return t.skip('POSIX executable fixture');
+  process.env.KENARI_BASE_URL = await stubCatalog([
+    { id: 'narrow', pricing: {}, reasoning_options: ['high', 'xhigh'] },
+  ]);
+  process.env.KENARI_ALLOW_HTTP = '1';
+  const { setKey } = await import('../src/store.js');
+  setKey('kn-testkey123');
+  const bin = path.join(home, 'bin-codex');
+  fs.mkdirSync(bin, { recursive: true });
+  fs.writeFileSync(path.join(bin, 'codex'), '#!/bin/sh\nexit 0\n', { mode: 0o755 });
+  const oldPath = process.env.PATH;
+  process.env.PATH = `${bin}${path.delimiter}${oldPath || ''}`;
+  try {
+    assert.equal(await run(
+      'configure', 'codex',
+      '--main', 'kenari/narrow', '--review', 'inherit', '--subagents', 'inherit', '--yes',
+    ), 0);
+    output = []; stdout = []; stderr = [];
+    await run('codex', '--version');
+    // runTool serves both tools. Telling a Codex user what Claude Code offers is
+    // describing a control they are not looking at.
+    assert.doesNotMatch(stderrLogs(), /Claude Code offers/);
+    assert.match(stderrLogs(), /effort high, xhigh/);
+  } finally {
+    process.env.PATH = oldPath;
+  }
+});
+
 test('status renders effort record and distinguishes unreported from none', async () => {
   const { saveState } = await import('../src/store.js');
   const base = { version: 2, migration: {}, tools: {} };

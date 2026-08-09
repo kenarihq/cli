@@ -554,35 +554,7 @@ async function runTool(tool, args) {
   if (warning) console.error(`warning: ${warning}`);
   if (requireKenari) assertSelectedModels(toolConfig, cache);
 
-  const fixed = Object.entries(toolConfig.roles)
-    .filter(([, role]) => role.mode === 'fixed')
-    .map(([slot, role]) => ({
-      slot,
-      modelId: role.model.slice('kenari/'.length),
-      model: cache?.models.find((item) => item.id === role.model.slice('kenari/'.length)),
-    }));
-  if (fixed.length) {
-    const slotWidth = Math.max(...fixed.map(({ slot }) => slot.length));
-    const modelWidth = Math.max(...fixed.map(({ modelId }) => `kenari/${modelId}`.length));
-    const claudeEffort = new Set(['low', 'medium', 'high', 'xhigh', 'max']);
-    for (const { slot, modelId, model } of fixed) {
-      const options = model?.reasoning_options;
-      const effort = options === null
-        ? 'unknown (gateway reports no capability)'
-        : options.length
-          ? options.join(', ')
-          : 'unsupported';
-      console.error(
-        `kenari: ${slot.padEnd(slotWidth)} -> ${`kenari/${modelId}`.padEnd(modelWidth)}  effort ${effort}`,
-      );
-      if (Array.isArray(options) && options.length
-        && [...claudeEffort].some((level) => !new Set(options).has(level))) {
-        console.error(`kenari: warning: Claude Code offers low through max; ${modelId} advertises only`);
-        console.error(`        ${options.join(', ')}, so the gateway adjusts the rest. Run kenari status to see`);
-        console.error('        which level was applied.');
-      }
-    }
-  }
+  printEffortCapabilities(tool, toolConfig, cache);
 
   const binary = originalBinary(tool);
   let catalogPath = null;
