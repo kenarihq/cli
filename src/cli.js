@@ -640,7 +640,7 @@ async function runTool(tool, args) {
         capabilityToken: tool === 'claude' ? randomBytes(32).toString('base64url') : null,
         // Diagnostic, never load bearing: a failed write must not disturb the session,
         // and nothing is printed because the tool owns the terminal from here.
-        onEffort: (record) => { try { recordEffort(record); } catch {} },
+        onEffort: (record) => { recordEffort(record).catch(() => {}); },
       },
       runtimeBuilder,
       runtimeOptions: { toolConfig, catalogPath },

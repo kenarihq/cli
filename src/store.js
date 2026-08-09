@@ -136,11 +136,19 @@ export function loadState() {
 // Merge rather than replace, so two models in one session both survive, and so a
 // concurrent session's record for a different model is not clobbered. Same model from
 // two sessions is still last write wins, which is right for a diagnostic.
-export function recordEffort(record) {
+export async function recordEffort(record) {
   const valid = validEffort(record);
   if (!valid) return;
-  const state = loadState();
-  saveState({ ...state, effort: validEffortMap({ ...state.effort, [valid.model]: valid }) });
+  // Locked, because this is a read-modify-write over the whole state file. Unlocked, it
+  // can drop state.migration written by a concurrent migrateV1, and that loss is
+  // permanent: the file is then version 2 with an empty migration, detectV1State returns
+  // null so the migration never re-runs, and an unresolved routing conflict is never
+  // reported again. Losing a diagnostic record under contention is the cheaper failure,
+  // and records self-heal because the next request rewrites them.
+  await withLock(() => {
+    const state = loadState();
+    saveState({ ...state, effort: validEffortMap({ ...state.effort, [valid.model]: valid }) });
+  });
 }
 export function saveState(state) { writePrivateJson(statePath(), state); }
 export function getToolState(id) { return loadState().tools[id] || null; }
