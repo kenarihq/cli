@@ -344,14 +344,16 @@ function cacheAge(cache) {
   return Math.max(0, Date.now() - Date.parse(cache.fetched_at));
 }
 
+// Floors at every tier, matching formatCatalogAge in catalog.js. Rounding here made the
+// two age strings in one status block disagree: 91 seconds read "2m ago" beside "1m".
 function effortAge(at) {
-  const seconds = Math.max(0, Math.round((Date.now() - at) / 1000));
+  const seconds = Math.max(0, Math.floor((Date.now() - at) / 1000));
   if (seconds < 60) return `${seconds}s ago`;
-  const minutes = Math.round(seconds / 60);
+  const minutes = Math.floor(seconds / 60);
   if (minutes < 60) return `${minutes}m ago`;
-  const hours = Math.round(minutes / 60);
+  const hours = Math.floor(minutes / 60);
   if (hours < 24) return `${hours}h ago`;
-  return `${Math.round(hours / 24)}d ago`;
+  return `${Math.floor(hours / 24)}d ago`;
 }
 
 function effortRecords(state) {

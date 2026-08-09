@@ -36,6 +36,12 @@ after(() => {
 async function capture(fn) {
   const originalLog = console.log;
   const originalError = console.error;
+  // process.stdout.write is stubbed too, not just console.log. Stubbing only console
+  // left the stdout purity assertion unable to see the realistic regression, which is
+  // an ADDITION rather than a move: a debug print or a library writing straight to the
+  // stream. Injecting one there left the suite green while breaking
+  // `claude -p --output-format json` for real.
+  const originalWrite = process.stdout.write;
   console.log = (...args) => {
     const line = args.join(' ');
     output.push(line);
@@ -46,11 +52,20 @@ async function capture(fn) {
     output.push(line);
     stderr.push(line);
   };
+  process.stdout.write = (chunk, ...rest) => {
+    // Strings only. The node:test runner shares this process and writes its own
+    // protocol frames here as Buffers; capturing those made every assertion see
+    // runner noise. A text write is what a stray debug print or a chatty library
+    // produces, which is the regression this is here to catch.
+    if (typeof chunk === 'string') stdout.push(chunk.replace(/\n$/, ''));
+    return originalWrite.call(process.stdout, chunk, ...rest);
+  };
   try {
     return await fn();
   } finally {
     console.log = originalLog;
     console.error = originalError;
+    process.stdout.write = originalWrite;
   }
 }
 
