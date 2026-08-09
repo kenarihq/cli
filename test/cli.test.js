@@ -630,3 +630,36 @@ test('two slots on different models each report their own capability, aligned', 
     process.env.PATH = oldPath;
   }
 });
+
+test('a launch that dies on a bad environment prints no capability advice first', async (t) => {
+  if (process.platform === 'win32') return t.skip('POSIX executable fixture');
+  process.env.KENARI_BASE_URL = await stubCatalog([
+    { id: 'narrow', pricing: {}, reasoning_options: ['high', 'xhigh'] },
+  ]);
+  process.env.KENARI_ALLOW_HTTP = '1';
+  const { setKey } = await import('../src/store.js');
+  setKey('kn-testkey123');
+  const bin = path.join(home, 'bin-ambig');
+  fs.mkdirSync(bin, { recursive: true });
+  fs.writeFileSync(path.join(bin, 'claude'), '#!/bin/sh\nexit 0\n', { mode: 0o755 });
+  const oldPath = process.env.PATH;
+  process.env.PATH = `${bin}${path.delimiter}${oldPath || ''}`;
+  try {
+    assert.equal(await run(
+      'configure', 'claude',
+      '--main', 'native', '--opus', 'native', '--sonnet', 'kenari/narrow',
+      '--haiku', 'native', '--fable', 'native', '--subagents', 'native', '--yes',
+    ), 0);
+    output = []; stdout = []; stderr = [];
+    // buildClaudeLaunch refuses this, so the launch never happens. Printing capability
+    // advice first made a real run read as though the advice caused the error.
+    process.env.ANTHROPIC_BASE_URL = 'https://example.invalid';
+    assert.equal(await run('claude', '--version'), 1);
+    assert.match(logs(), /routing environment is ambiguous/);
+    assert.doesNotMatch(stderrLogs(), /effort high, xhigh/);
+    assert.doesNotMatch(stderrLogs(), /warning: Claude Code offers/);
+  } finally {
+    process.env.PATH = oldPath;
+    delete process.env.ANTHROPIC_BASE_URL;
+  }
+});
