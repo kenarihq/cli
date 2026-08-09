@@ -354,7 +354,11 @@ function effortAge(at) {
 }
 
 function effortSummary(effort) {
-  return `${effort.model} requested=${effort.requested ?? 'none'} `
+  // Neither absent value borrows the word none, because none is itself a level a
+  // client can pick and a gateway can apply. "unset" is a client that sent no level,
+  // "unreported" is a gateway that sent no header, and both differ from "none".
+  // The kenari/ prefix matches how the model is named everywhere else the user sees it.
+  return `kenari/${effort.model} requested=${effort.requested ?? 'unset'} `
     + `gated=${effort.gated ?? 'unreported'} ${effort.status} ${effortAge(effort.at)}`;
 }
 

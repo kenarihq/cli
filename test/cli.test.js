@@ -207,7 +207,7 @@ test('status renders effort record and distinguishes unreported from none', asyn
     model: 'gpt-5-6-luna', requested: null, gated: null, status: 200, at: Date.now() - 240000,
   } });
   assert.equal(await run('status'), 0);
-  assert.match(logs(), /effort\s+gpt-5-6-luna requested=none gated=unreported 200 4m ago/);
+  assert.match(logs(), /effort\s+kenari\/gpt-5-6-luna requested=unset gated=unreported 200 4m ago/);
   output = [];
   assert.equal(await run('status', '--json'), 0);
   const json = JSON.parse(logs());
@@ -220,7 +220,17 @@ test('status renders effort record and distinguishes unreported from none', asyn
     model: 'gpt-5-6-luna', requested: 'max', gated: 'none', status: 200, at: Date.now(),
   } });
   assert.equal(await run('status'), 0);
-  assert.match(logs(), /effort\s+gpt-5-6-luna requested=max gated=none 200 0s ago/);
+  assert.match(logs(), /effort\s+kenari\/gpt-5-6-luna requested=max gated=none 200 0s ago/);
+
+  // A client that picked the none level must not read the same as one that picked
+  // nothing at all. This is the pair the previous wording collapsed.
+  output = [];
+  saveState({ ...base, effort: {
+    model: 'gpt-5-6-luna', requested: 'none', gated: 'none', status: 200, at: Date.now(),
+  } });
+  assert.equal(await run('status'), 0);
+  assert.match(logs(), /requested=none gated=none/);
+  assert.doesNotMatch(logs(), /requested=unset/);
 });
 
 test('status omits effort when no record exists', async () => {
