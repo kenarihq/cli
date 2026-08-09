@@ -468,20 +468,26 @@ async function cmdModels(argv) {
       output_price: model.output_price,
       context_limit: model.context_limit,
       output_limit: model.output_limit,
-      reasoning_efforts: model.reasoning_efforts,
+      reasoning_options: model.reasoning_options,
     })),
   };
   if (flags.json) {
     console.log(JSON.stringify(output, null, 2));
     return 0;
   }
-  console.log(`${'id'.padEnd(30)} ${'in /1M'.padStart(12)} ${'out /1M'.padStart(12)} ${'context'.padStart(10)} ${'output'.padStart(10)}`);
+  console.log(`${'id'.padEnd(30)} ${'in /1M'.padStart(12)} ${'out /1M'.padStart(12)} ${'context'.padStart(10)} ${'output'.padStart(10)} ${'effort'.padStart(20)}`);
   for (const model of output.models) {
+    const effort = model.reasoning_options === null
+      ? '?'
+      : model.reasoning_options.length
+        ? model.reasoning_options.join(', ')
+        : 'none';
     console.log(
       `${model.id.padEnd(30)} ${formatRp(model.input_price).padStart(12)} `
       + `${formatRp(model.output_price).padStart(12)} `
       + `${String(model.context_limit ?? '-').padStart(10)} `
-      + `${String(model.output_limit ?? '-').padStart(10)}`,
+      + `${String(model.output_limit ?? '-').padStart(10)} `
+      + `${effort.padStart(20)}`,
     );
   }
   console.log(`cache age: ${Math.round(output.age_ms / 1000)}s`);

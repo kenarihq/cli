@@ -78,7 +78,7 @@ const CATALOG = [{
   },
   context_length: 200000,
   output_limit: 32000,
-  reasoning_efforts: ['low', 'high'],
+  reasoning_options: ['high', 'xhigh'],
 }];
 
 test('help exposes v2 surface and removed commands stay unknown', async () => {
@@ -200,7 +200,7 @@ test('status JSON is offline and never prints credential', async () => {
   assert.doesNotMatch(logs(), new RegExp(key));
 });
 
-test('models JSON uses kenari prefix and includes limits', async () => {
+test('models JSON uses reasoning options and limits', async () => {
   process.env.KENARI_BASE_URL = await stubCatalog(CATALOG);
   process.env.KENARI_ALLOW_HTTP = '1';
   const { setKey } = await import('../src/store.js');
@@ -208,6 +208,23 @@ test('models JSON uses kenari prefix and includes limits', async () => {
   assert.equal(await run('models', '--json'), 0);
   assert.match(logs(), /"id": "kenari\/glm-5-2"/);
   assert.match(logs(), /"output_limit": 32000/);
+  assert.match(logs(), /"reasoning_options": \[\n\s+"high",\n\s+"xhigh"\n\s+\]/);
+  assert.doesNotMatch(logs(), /reasoning_efforts/);
+});
+
+test('models table renders unknown, unsupported, and advertised effort states', async () => {
+  process.env.KENARI_BASE_URL = await stubCatalog([
+    { id: 'unknown', pricing: {}, reasoning_options: undefined },
+    { id: 'unsupported', pricing: {}, reasoning_options: [] },
+    { id: 'listed', pricing: {}, reasoning_options: ['high', 'xhigh'] },
+  ]);
+  process.env.KENARI_ALLOW_HTTP = '1';
+  const { setKey } = await import('../src/store.js');
+  setKey('kn-testkey123');
+  assert.equal(await run('models'), 0);
+  assert.match(logs(), /\?/);
+  assert.match(logs(), /none/);
+  assert.match(logs(), /high, xhigh/);
 });
 
 test('reset leaves login but removes unused shared cache', async () => {
