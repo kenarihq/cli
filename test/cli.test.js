@@ -222,9 +222,28 @@ test('models table renders unknown, unsupported, and advertised effort states', 
   const { setKey } = await import('../src/store.js');
   setKey('kn-testkey123');
   assert.equal(await run('models'), 0);
-  assert.match(logs(), /\?/);
-  assert.match(logs(), /none/);
-  assert.match(logs(), /high, xhigh/);
+  // Anchored to the row, so a stray match elsewhere in the table cannot pass these.
+  assert.match(logs(), /^kenari\/unknown\s.*\s\?$/m);
+  assert.match(logs(), /^kenari\/unsupported\s.*\sunsupported$/m);
+  assert.match(logs(), /^kenari\/listed\s.*\shigh, xhigh$/m);
+  // "none" is a level, not the empty set. A model advertising it must render it, and
+  // a model with no levels must not borrow the word.
+  assert.doesNotMatch(logs(), /^kenari\/unsupported\s.*\snone$/m);
+});
+
+test('models table renders none as the level it is, not as the empty set', async () => {
+  process.env.KENARI_BASE_URL = await stubCatalog([
+    { id: 'full', pricing: {}, reasoning_options: ['none', 'low', 'medium', 'high', 'xhigh', 'max'] },
+    { id: 'minimalist', pricing: {}, reasoning_options: ['minimal', 'low', 'medium', 'high'] },
+  ]);
+  process.env.KENARI_ALLOW_HTTP = '1';
+  const { setKey } = await import('../src/store.js');
+  setKey('kn-testkey123');
+  assert.equal(await run('models'), 0);
+  assert.match(logs(), /^kenari\/full\s.*\snone, low, medium, high, xhigh, max$/m);
+  // minimal is a real level on 5 production models and is outside the set the rest of
+  // this codebase assumes. It must survive to the display verbatim.
+  assert.match(logs(), /^kenari\/minimalist\s.*\sminimal, low, medium, high$/m);
 });
 
 test('reset leaves login but removes unused shared cache', async () => {

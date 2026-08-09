@@ -183,8 +183,8 @@ test('codexKenariModels removes OpenAI-private mode fields and matches dotted na
   }];
   const kenari = codexKenariModels({
     models: [
-      { id: 'gpt-5-6-sol', context_limit: 200000, reasoning_efforts: ['medium', 'high'] },
-      { id: 'glm-5-2', context_limit: 128000 },
+      { id: 'gpt-5-6-sol', context_limit: 200000, reasoning_options: ['medium', 'high'] },
+      { id: 'glm-5-2', context_limit: 128000, reasoning_options: null },
     ],
   }, native);
   const sol = kenari.find((m) => m.slug === 'kenari/gpt-5-6-sol');
