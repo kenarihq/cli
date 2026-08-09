@@ -452,7 +452,6 @@ async function cmdModels(argv) {
     const result = await loadCatalogForLaunch({
       key,
       requireKenari: true,
-      maxAgeMs: 0,
     });
     cache = result.cache;
     if (result.warning) console.log(`warning: ${result.warning}`);
