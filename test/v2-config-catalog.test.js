@@ -65,23 +65,18 @@ test('v2 config rejects partial roles, bad mode placement, and unprefixed fixed 
   assert.throws(() => validateConfig({ version: 2, tools: { claude: { roles: claude } } }), /kenari/);
 });
 
-test('catalog normalizes reasoning options and capability', () => {
+test('catalog normalizes reasoning options into three distinct states', () => {
   const cases = [
-    [{}, null, false],
-    [{ reasoning_options: [] }, [], false],
-    [{ reasoning_options: ['high', 'xhigh'] }, ['high', 'xhigh'], false],
-    [{ reasoning_options: ['high', 'high', 'xhigh'] }, ['high', 'xhigh'], false],
-    [{ reasoning_options: ['high', 5, null] }, ['high'], false],
-    [{ reasoning_options: 'high' }, null, false],
+    [{}, null],
+    [{ reasoning_options: [] }, []],
+    [{ reasoning_options: ['high', 'xhigh'] }, ['high', 'xhigh']],
+    [{ reasoning_options: ['high', 'high', 'xhigh'] }, ['high', 'xhigh']],
+    [{ reasoning_options: ['high', 5, null] }, ['high']],
+    [{ reasoning_options: 'high' }, null],
   ];
-  for (const [model, options, reasoning] of cases) {
+  for (const [model, options] of cases) {
     const result = validateCatalogResponse({ data: [{ id: 'model', ...model }] }, 'https://gateway.example');
-    assert.deepEqual(result.models[0].reasoning_options, options);
-    assert.equal(result.models[0].reasoning, reasoning);
-  }
-  for (const value of [true, false]) {
-    const result = validateCatalogResponse({ data: [{ id: 'model', reasoning: value }] }, 'https://gateway.example');
-    assert.equal(result.models[0].reasoning, value);
+    assert.deepEqual(result.models[0].reasoning_options, options, JSON.stringify(model));
   }
 });
 
@@ -113,7 +108,6 @@ test('a cached model missing the field reads as unknown, not undefined', (t) => 
   }));
   const cache = loadCatalogCache();
   assert.equal(cache.models[0].reasoning_options, null);
-  assert.equal(cache.models[0].reasoning, false);
   // The same normalization the fetch path applies, so both entry points agree.
   assert.deepEqual(cache.models[1].reasoning_options, ['high']);
 });

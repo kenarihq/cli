@@ -17,6 +17,26 @@ function normalizeOptions(value) {
   return [...new Set(value.filter((v) => typeof v === 'string'))];
 }
 
+// The tri-state decision in one place. Every surface that renders capability branches on
+// the same three cases, and confusing null with [] was the single most repeated defect in
+// building this. The unknown label differs by surface, a narrow table column against a
+// line of prose, so it is a parameter rather than a reason to keep three copies.
+export function formatEffortOptions(options, unknownLabel) {
+  if (options === null || options === undefined) return unknownLabel;
+  return options.length ? options.join(', ') : 'unsupported';
+}
+
+// Largest whole unit, floored. Returns the bare unit so a caller can add "ago" or not.
+export function formatAge(ms) {
+  const seconds = Math.max(0, Math.floor(ms / 1000));
+  if (seconds < 60) return `${seconds}s`;
+  const minutes = Math.floor(seconds / 60);
+  if (minutes < 60) return `${minutes}m`;
+  const hours = Math.floor(minutes / 60);
+  if (hours < 24) return `${hours}h`;
+  return `${Math.floor(hours / 24)}d`;
+}
+
 export function validateCatalogResponse(body, gateway) {
   if (!body || typeof body !== 'object' || !Array.isArray(body.data)) {
     throw new KenariError('Kenari catalog has an unsupported schema');
@@ -37,7 +57,6 @@ export function validateCatalogResponse(body, gateway) {
       context_limit: numberOrNull(model.context_length),
       output_limit: numberOrNull(model.output_limit ?? model.max_output_tokens),
       reasoning_options: normalizeOptions(model.reasoning_options),
-      reasoning: model.reasoning === true,
       compatibility: model.compatibility && typeof model.compatibility === 'object'
         ? model.compatibility
         : {},
@@ -63,7 +82,6 @@ export function validateCatalogCache(value) {
     }
     ids.add(model.id);
     model.reasoning_options = normalizeOptions(model.reasoning_options);
-    model.reasoning = model.reasoning === true;
   }
   return value;
 }
@@ -80,17 +98,6 @@ export function saveCatalogCache(cache) {
   const value = validateCatalogCache(cache);
   writePrivateJson(modelCachePath(), value);
   return value;
-}
-
-function formatCatalogAge(fetchedAt, now = Date.now()) {
-  const ageMs = Math.max(0, now - Date.parse(fetchedAt));
-  const seconds = Math.floor(ageMs / 1000);
-  if (seconds < 60) return `${Math.max(1, seconds)}s`;
-  const minutes = Math.floor(seconds / 60);
-  if (minutes < 60) return `${minutes}m`;
-  const hours = Math.floor(minutes / 60);
-  if (hours < 24) return `${hours}h`;
-  return `${Math.floor(hours / 24)}d`;
 }
 
 export async function refreshCatalogCache(key, options = {}) {
@@ -115,7 +122,7 @@ export async function loadCatalogForLaunch(options = {}) {
       if (cache) {
         return {
           cache,
-          warning: `catalog refresh failed, using catalog from ${formatCatalogAge(cache.fetched_at, options.now)} ago: ${error.message}`,
+          warning: `catalog refresh failed, using catalog from ${formatAge((options.now ?? Date.now()) - Date.parse(cache.fetched_at))} ago: ${error.message}`,
           refreshed: false,
         };
       }

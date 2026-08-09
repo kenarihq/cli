@@ -110,6 +110,9 @@ function validEffortMap(value) {
 
 export function loadState() {
   const parsed = readJson(statePath());
+  // Normalized once. Both branches must carry it, and computing it twice is how the two
+  // copies drift when the record shape changes.
+  const effort = validEffortMap(parsed?.effort);
   // No file means a fresh install, which is a version 2 install. Only an actual
   // version 1 file on disk yields the version 1 shape. Defaulting the other way wrote
   // a version 1 file on the first session, which made detectV1State true and sent the
@@ -119,7 +122,7 @@ export function loadState() {
       version: 2,
       migration: parsed?.migration && typeof parsed.migration === 'object' ? parsed.migration : {},
       tools: {},
-      effort: validEffortMap(parsed?.effort),
+      effort,
     };
   }
   if (parsed.version && parsed.version !== 1) {
@@ -129,7 +132,7 @@ export function loadState() {
     version: 1,
     tools: (typeof parsed.tools === 'object' && parsed.tools) || {},
     migration_conflicts: Array.isArray(parsed.migration_conflicts) ? parsed.migration_conflicts : [],
-    effort: validEffortMap(parsed.effort),
+    effort,
   };
 }
 

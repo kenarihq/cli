@@ -12,7 +12,6 @@ import {
   maskKey,
   recordEffort,
   removeFile,
-  saveState,
   setKey,
   withLock,
 } from './store.js';
@@ -24,6 +23,8 @@ import {
   saveConfig,
 } from './config.js';
 import {
+  formatAge,
+  formatEffortOptions,
   loadCatalogCache,
   loadCatalogForLaunch,
   writeMergedCodexCatalog,
@@ -344,20 +345,8 @@ function cacheAge(cache) {
   return Math.max(0, Date.now() - Date.parse(cache.fetched_at));
 }
 
-// Floors at every tier, matching formatCatalogAge in catalog.js. Rounding here made the
-// two age strings in one status block disagree: 91 seconds read "2m ago" beside "1m".
-function effortAge(at) {
-  const seconds = Math.max(0, Math.floor((Date.now() - at) / 1000));
-  if (seconds < 60) return `${seconds}s ago`;
-  const minutes = Math.floor(seconds / 60);
-  if (minutes < 60) return `${minutes}m ago`;
-  const hours = Math.floor(minutes / 60);
-  if (hours < 24) return `${hours}h ago`;
-  return `${Math.floor(hours / 24)}d ago`;
-}
-
 function effortRecords(state) {
-  return Object.values(state.effort || {}).sort((a, b) => b.at - a.at);
+  return Object.values(state.effort).sort((a, b) => b.at - a.at);
 }
 
 function effortSummary(effort) {
@@ -366,7 +355,7 @@ function effortSummary(effort) {
   // "unreported" is a gateway that sent no header, and both differ from "none".
   // The kenari/ prefix matches how the model is named everywhere else the user sees it.
   return `kenari/${effort.model} requested=${effort.requested ?? 'unset'} `
-    + `gated=${effort.gated ?? 'unreported'} ${effort.status} ${effortAge(effort.at)}`;
+    + `gated=${effort.gated ?? 'unreported'} ${effort.status} ${formatAge(Date.now() - effort.at)} ago`;
 }
 
 function offlineStatus() {
@@ -510,13 +499,9 @@ async function cmdModels(argv) {
   }
   console.log(`${'id'.padEnd(30)} ${'in /1M'.padStart(12)} ${'out /1M'.padStart(12)} ${'context'.padStart(10)} ${'output'.padStart(10)} effort`);
   for (const model of output.models) {
-    // Not "none" for the empty set: none is itself a level several models advertise,
-    // so the same word in the same column would mean two different things.
-    const effort = model.reasoning_options === null
-      ? '?'
-      : model.reasoning_options.length
-        ? model.reasoning_options.join(', ')
-        : 'unsupported';
+    // "?" rather than "none" for a narrow column: none is itself a level several models
+    // advertise, so the same word in one column would mean two different things.
+    const effort = formatEffortOptions(model.reasoning_options, '?');
     console.log(
       `${model.id.padEnd(30)} ${formatRp(model.input_price).padStart(12)} `
       + `${formatRp(model.output_price).padStart(12)} `
@@ -568,12 +553,10 @@ function printEffortCapabilities(tool, toolConfig, cache) {
   const slotWidth = Math.max(...fixed.map(({ slot }) => slot.length));
   const modelWidth = Math.max(...fixed.map(({ modelId }) => `kenari/${modelId}`.length));
   for (const { slot, modelId, model } of fixed) {
-    const options = model?.reasoning_options;
-    const effort = options === null || options === undefined
-      ? 'unknown (gateway reports no capability)'
-      : options.length
-        ? options.join(', ')
-        : 'unsupported';
+    const effort = formatEffortOptions(
+      model?.reasoning_options,
+      'unknown (gateway reports no capability)',
+    );
     console.error(
       `kenari: ${slot.padEnd(slotWidth)} -> ${`kenari/${modelId}`.padEnd(modelWidth)}  effort ${effort}`,
     );

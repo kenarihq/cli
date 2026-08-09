@@ -92,7 +92,7 @@ async function startRouterServer(options) {
   // Keyed by model, not one shared key. Claude Code alternates slots inside a session,
   // sonnet for the work and haiku for background tasks, so a single key would see every
   // alternation as a change and report on every request for the whole session.
-  const lastEffortKey = new Map();
+  const lastEffort = new Map();
 
   // Observe only. The gateway owns clamping and stripping and has a tested matrix for
   // it; a router that adjusted the level here would make this record a lie.
@@ -101,16 +101,16 @@ async function startRouterServer(options) {
     const stamped = upstreamRes.headers['x-kenari-gated-effort'];
     // Both stay verbatim. The level vocabulary is open (production advertises seven,
     // including minimal), so validating or normalizing here would drop real values.
-    const record = {
-      model,
-      requested: typeof asked === 'string' ? asked : null,
-      gated: typeof stamped === 'string' ? stamped : null,
-      status: upstreamRes.statusCode || 0,
-    };
-    const key = JSON.stringify(record);
-    if (lastEffortKey.get(model) === key) return;
-    lastEffortKey.set(model, key);
-    try { onEffort({ ...record, at: Date.now() }); } catch {}
+    const requested = typeof asked === 'string' ? asked : null;
+    const gated = typeof stamped === 'string' ? stamped : null;
+    const status = upstreamRes.statusCode || 0;
+    // Three primitive compares, on a proxy that sees every request of a session. The
+    // record and its timestamp are built only when something actually changed, so an
+    // unchanged response costs no allocation and no serialization.
+    const last = lastEffort.get(model);
+    if (last && last.requested === requested && last.gated === gated && last.status === status) return;
+    lastEffort.set(model, { requested, gated, status });
+    try { onEffort({ model, requested, gated, status, at: Date.now() }); } catch {}
   }
 
   const server = http.createServer(async (req, res) => {
