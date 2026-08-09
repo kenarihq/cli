@@ -8,8 +8,7 @@ import {
   validateConfig, saveConfig, loadConfig, hasKenariRoutes,
 } from '../src/config.js';
 import {
-  validateCatalogResponse, saveCatalogCache, loadCatalogCache,
-  catalogIsFresh, loadCatalogForLaunch,
+  validateCatalogResponse, saveCatalogCache, loadCatalogCache, loadCatalogForLaunch,
 } from '../src/catalog.js';
 
 function roles(tool) {
@@ -66,29 +65,81 @@ test('v2 config rejects partial roles, bad mode placement, and unprefixed fixed 
   assert.throws(() => validateConfig({ version: 2, tools: { claude: { roles: claude } } }), /kenari/);
 });
 
-test('catalog validation and stale fallback preserve cache metadata', async (t) => {
+test('catalog normalizes reasoning options into three distinct states', () => {
+  const cases = [
+    [{}, null],
+    [{ reasoning_options: [] }, []],
+    [{ reasoning_options: ['high', 'xhigh'] }, ['high', 'xhigh']],
+    [{ reasoning_options: ['high', 'high', 'xhigh'] }, ['high', 'xhigh']],
+    [{ reasoning_options: ['high', 5, null] }, ['high']],
+    [{ reasoning_options: 'high' }, null],
+  ];
+  for (const [model, options] of cases) {
+    const result = validateCatalogResponse({ data: [{ id: 'model', ...model }] }, 'https://gateway.example');
+    assert.deepEqual(result.models[0].reasoning_options, options, JSON.stringify(model));
+  }
+});
+
+test('a catalog cache of any other version is discarded, never fatal', (t) => {
+  const dir = tempHome(t);
+  // Version 3 stands for a file written by a newer CLI. Discarding beats throwing:
+  // the cache is regenerable, so a launch must not die on one.
+  for (const version of [1, 3]) {
+    fs.writeFileSync(path.join(dir, 'model-cache.json'), JSON.stringify({
+      version,
+      fetched_at: new Date().toISOString(),
+      gateway: 'https://gateway.example',
+      models: [],
+    }));
+    assert.equal(loadCatalogCache(), null, `version ${version} should be discarded`);
+  }
+});
+
+test('a cached model missing the field reads as unknown, not undefined', (t) => {
+  const dir = tempHome(t);
+  // validateCatalogCache checks ids, not per-model fields, so a version 2 file whose
+  // models predate the field loads fine. Consumers branch on === null and would then
+  // hit .length on undefined, crashing a launch on a display line.
+  fs.writeFileSync(path.join(dir, 'model-cache.json'), JSON.stringify({
+    version: 2,
+    fetched_at: new Date().toISOString(),
+    gateway: 'https://gateway.example',
+    models: [{ id: 'glm-5-2' }, { id: 'gpt-5-6-luna', reasoning_options: ['high', 'high'] }],
+  }));
+  const cache = loadCatalogCache();
+  assert.equal(cache.models[0].reasoning_options, null);
+  // The same normalization the fetch path applies, so both entry points agree.
+  assert.deepEqual(cache.models[1].reasoning_options, ['high']);
+});
+
+test('catalog refresh failure falls back with cache age', async (t) => {
   tempHome(t);
-  const cache = validateCatalogResponse({
-    data: [{
-      id: 'glm-5',
-      pricing: { unit: 'micro_idr_per_1m_tokens', input: 2_000_000, output: 3_000_000 },
-      context_length: 200000,
-      output_limit: 128000,
-      reasoning_efforts: ['medium'],
-    }],
-  }, 'https://127.0.0.1.invalid');
+  const fetchedAt = new Date(Date.now() - 3 * 60 * 60 * 1000 - 30_000).toISOString();
+  const cache = {
+    ...validateCatalogResponse({ data: [{ id: 'glm-5', context_length: 200000 }] }, 'https://127.0.0.1.invalid'),
+    fetched_at: fetchedAt,
+  };
   saveCatalogCache(cache);
-  assert.equal(loadCatalogCache().models[0].output_limit, 128000);
-  assert.equal(catalogIsFresh(cache, Date.parse(cache.fetched_at) + 100), true);
   const result = await loadCatalogForLaunch({
     key: 'kn-test12345',
     requireKenari: true,
-    now: Date.parse(cache.fetched_at) + 100_000_000,
+    now: Date.parse(fetchedAt) + 3 * 60 * 60 * 1000,
     base: 'https://127.0.0.1.invalid',
     timeoutMs: 10,
   });
   assert.equal(result.cache.models[0].id, 'glm-5');
-  assert.match(result.warning, /using cached catalog/);
+  assert.match(result.warning, /catalog refresh failed, using catalog from 3h ago:/);
+});
+
+test('catalog refresh failure without cache still throws when required', async (t) => {
+  tempHome(t);
+  await assert.rejects(
+    loadCatalogForLaunch({
+      key: 'kn-test12345', requireKenari: true,
+      base: 'https://127.0.0.1.invalid', timeoutMs: 10,
+    }),
+    /catalog request|cannot reach|timed out/,
+  );
 });
 
 test('catalog from another gateway is never reused for a Kenari route', async (t) => {
@@ -125,9 +176,32 @@ test('catalog refresh uses bounded authenticated request', async (t) => {
   t.after(() => server.close());
   const base = `http://127.0.0.1:${server.address().port}`;
   const result = await loadCatalogForLaunch({
-    key: 'kn-test12345', requireKenari: true, base, maxAgeMs: 0,
+    key: 'kn-test12345', requireKenari: true, base,
   });
   assert.equal(result.refreshed, true);
   assert.equal(result.cache.models[0].id, 'gpt-5');
   assert.equal(auth, 'Bearer kn-test12345');
+});
+
+test('catalog always fetches despite recent cache', async (t) => {
+  tempHome(t);
+  const oldAllow = process.env.KENARI_ALLOW_HTTP;
+  process.env.KENARI_ALLOW_HTTP = '1';
+  t.after(() => {
+    if (oldAllow === undefined) delete process.env.KENARI_ALLOW_HTTP;
+    else process.env.KENARI_ALLOW_HTTP = oldAllow;
+  });
+  let requests = 0;
+  const server = http.createServer((req, res) => {
+    requests += 1;
+    res.setHeader('content-type', 'application/json');
+    res.end(JSON.stringify({ data: [{ id: 'fresh-model', context_length: 1000 }] }));
+  });
+  await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
+  t.after(() => server.close());
+  const base = `http://127.0.0.1:${server.address().port}`;
+  saveCatalogCache(validateCatalogResponse({ data: [{ id: 'old-model' }] }, base));
+  const result = await loadCatalogForLaunch({ key: 'kn-test12345', requireKenari: true, base });
+  assert.equal(requests, 1);
+  assert.equal(result.cache.models[0].id, 'fresh-model');
 });

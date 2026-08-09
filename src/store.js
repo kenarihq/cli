@@ -77,23 +77,81 @@ export function maskKey(key) {
   return key.slice(0, 6) + '...' + key.slice(-3);
 }
 
+function validEffort(value) {
+  if (!value || typeof value !== 'object' || Array.isArray(value)
+    || typeof value.model !== 'string'
+    || !(value.requested === null || typeof value.requested === 'string')
+    || !(value.gated === null || typeof value.gated === 'string')
+    || !Number.isInteger(value.status)
+    || !Number.isFinite(value.at)) return null;
+  return {
+    model: value.model,
+    requested: value.requested,
+    gated: value.gated,
+    status: value.status,
+    at: value.at,
+  };
+}
+
+// Keyed by model id. One global record could not answer the question the pre-launch
+// banner raises, since that banner lists every fixed slot and a session routes to more
+// than one model. Bounded so a long-lived install does not accumulate retired models.
+const EFFORT_KEEP = 8;
+
+function validEffortMap(value) {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return {};
+  const records = Object.values(value)
+    .map(validEffort)
+    .filter(Boolean)
+    .sort((a, b) => b.at - a.at)
+    .slice(0, EFFORT_KEEP);
+  return Object.fromEntries(records.map((record) => [record.model, record]));
+}
+
 export function loadState() {
   const parsed = readJson(statePath());
-  if (parsed?.version === 2) {
+  // Normalized once. Both branches must carry it, and computing it twice is how the two
+  // copies drift when the record shape changes.
+  const effort = validEffortMap(parsed?.effort);
+  // No file means a fresh install, which is a version 2 install. Only an actual
+  // version 1 file on disk yields the version 1 shape. Defaulting the other way wrote
+  // a version 1 file on the first session, which made detectV1State true and sent the
+  // next launch through a migration that had nothing to migrate and dropped the record.
+  if (!parsed || parsed.version === 2) {
     return {
       version: 2,
-      migration: parsed.migration && typeof parsed.migration === 'object' ? parsed.migration : {},
+      migration: parsed?.migration && typeof parsed.migration === 'object' ? parsed.migration : {},
       tools: {},
+      effort,
     };
   }
-  if (parsed && parsed.version && parsed.version !== 1) {
+  if (parsed.version && parsed.version !== 1) {
     throw new KenariError('state.json was written by a newer kenari CLI; upgrade this CLI or remove ~/.kenari/state.json');
   }
   return {
     version: 1,
-    tools: (parsed && typeof parsed.tools === 'object' && parsed.tools) || {},
-    migration_conflicts: Array.isArray(parsed?.migration_conflicts) ? parsed.migration_conflicts : [],
+    tools: (typeof parsed.tools === 'object' && parsed.tools) || {},
+    migration_conflicts: Array.isArray(parsed.migration_conflicts) ? parsed.migration_conflicts : [],
+    effort,
   };
+}
+
+// Merge rather than replace, so two models in one session both survive, and so a
+// concurrent session's record for a different model is not clobbered. Same model from
+// two sessions is still last write wins, which is right for a diagnostic.
+export async function recordEffort(record) {
+  const valid = validEffort(record);
+  if (!valid) return;
+  // Locked, because this is a read-modify-write over the whole state file. Unlocked, it
+  // can drop state.migration written by a concurrent migrateV1, and that loss is
+  // permanent: the file is then version 2 with an empty migration, detectV1State returns
+  // null so the migration never re-runs, and an unresolved routing conflict is never
+  // reported again. Losing a diagnostic record under contention is the cheaper failure,
+  // and records self-heal because the next request rewrites them.
+  await withLock(() => {
+    const state = loadState();
+    saveState({ ...state, effort: validEffortMap({ ...state.effort, [valid.model]: valid }) });
+  });
 }
 export function saveState(state) { writePrivateJson(statePath(), state); }
 export function getToolState(id) { return loadState().tools[id] || null; }

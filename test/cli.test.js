@@ -7,8 +7,12 @@ import http from 'node:http';
 
 let home;
 let output;
+let stdout;
+let stderr;
 const servers = [];
 const logs = () => output.join('\n');
+const stdoutLogs = () => stdout.join('\n');
+const stderrLogs = () => stderr.join('\n');
 
 beforeEach(() => {
   home = fs.mkdtempSync(path.join(os.tmpdir(), 'kenari-cli-v2-'));
@@ -21,6 +25,8 @@ beforeEach(() => {
   delete process.env.ANTHROPIC_AUTH_TOKEN;
   delete process.env.ANTHROPIC_API_KEY;
   output = [];
+  stdout = [];
+  stderr = [];
 });
 
 after(() => {
@@ -30,13 +36,36 @@ after(() => {
 async function capture(fn) {
   const originalLog = console.log;
   const originalError = console.error;
-  console.log = (...args) => output.push(args.join(' '));
-  console.error = (...args) => output.push(args.join(' '));
+  // process.stdout.write is stubbed too, not just console.log. Stubbing only console
+  // left the stdout purity assertion unable to see the realistic regression, which is
+  // an ADDITION rather than a move: a debug print or a library writing straight to the
+  // stream. Injecting one there left the suite green while breaking
+  // `claude -p --output-format json` for real.
+  const originalWrite = process.stdout.write;
+  console.log = (...args) => {
+    const line = args.join(' ');
+    output.push(line);
+    stdout.push(line);
+  };
+  console.error = (...args) => {
+    const line = args.join(' ');
+    output.push(line);
+    stderr.push(line);
+  };
+  process.stdout.write = (chunk, ...rest) => {
+    // Strings only. The node:test runner shares this process and writes its own
+    // protocol frames here as Buffers; capturing those made every assertion see
+    // runner noise. A text write is what a stray debug print or a chatty library
+    // produces, which is the regression this is here to catch.
+    if (typeof chunk === 'string') stdout.push(chunk.replace(/\n$/, ''));
+    return originalWrite.call(process.stdout, chunk, ...rest);
+  };
   try {
     return await fn();
   } finally {
     console.log = originalLog;
     console.error = originalError;
+    process.stdout.write = originalWrite;
   }
 }
 
@@ -78,7 +107,7 @@ const CATALOG = [{
   },
   context_length: 200000,
   output_limit: 32000,
-  reasoning_efforts: ['low', 'high'],
+  reasoning_options: ['high', 'xhigh'],
 }];
 
 test('help exposes v2 surface and removed commands stay unknown', async () => {
@@ -200,7 +229,116 @@ test('status JSON is offline and never prints credential', async () => {
   assert.doesNotMatch(logs(), new RegExp(key));
 });
 
-test('models JSON uses kenari prefix and includes limits', async () => {
+test('the narrowing warning is per model, not per slot, and names the right tool', async (t) => {
+  if (process.platform === 'win32') return t.skip('POSIX executable fixture');
+  process.env.KENARI_BASE_URL = await stubCatalog([
+    { id: 'narrow', pricing: {}, reasoning_options: ['high', 'xhigh'] },
+  ]);
+  process.env.KENARI_ALLOW_HTTP = '1';
+  const { setKey } = await import('../src/store.js');
+  setKey('kn-testkey123');
+  const bin = path.join(home, 'bin-many');
+  fs.mkdirSync(bin, { recursive: true });
+  fs.writeFileSync(path.join(bin, 'claude'), '#!/bin/sh\nexit 0\n', { mode: 0o755 });
+  const oldPath = process.env.PATH;
+  process.env.PATH = `${bin}${path.delimiter}${oldPath || ''}`;
+  try {
+    // The real shape: a user routing every slot at one model, not the one-slot mockup.
+    assert.equal(await run(
+      'configure', 'claude',
+      '--main', 'kenari/narrow', '--opus', 'kenari/narrow', '--sonnet', 'kenari/narrow',
+      '--haiku', 'kenari/narrow', '--fable', 'kenari/narrow', '--subagents', 'kenari/narrow',
+      '--yes',
+    ), 0);
+    output = []; stdout = []; stderr = [];
+    assert.equal(await run('claude', '--version'), 0);
+    const lines = stderr.filter((line) => line.includes('warning: Claude Code offers'));
+    assert.equal(lines.length, 1, 'one warning for the model, not one per slot');
+    // Every slot still gets its own capability line: that part is per slot by design.
+    assert.equal(stderr.filter((line) => line.includes('effort high, xhigh')).length, 6);
+  } finally {
+    process.env.PATH = oldPath;
+  }
+});
+
+test('the narrowing warning names Codex when Codex is what is launching', async (t) => {
+  if (process.platform === 'win32') return t.skip('POSIX executable fixture');
+  process.env.KENARI_BASE_URL = await stubCatalog([
+    { id: 'narrow', pricing: {}, reasoning_options: ['high', 'xhigh'] },
+  ]);
+  process.env.KENARI_ALLOW_HTTP = '1';
+  const { setKey } = await import('../src/store.js');
+  setKey('kn-testkey123');
+  const bin = path.join(home, 'bin-codex');
+  fs.mkdirSync(bin, { recursive: true });
+  // The banner prints just before spawn, so the fixture has to survive the whole codex
+  // launch path: login status for the native base, then debug models for the catalog.
+  fs.writeFileSync(path.join(bin, 'codex'), [
+    '#!/bin/sh',
+    'if [ "$1" = "login" ]; then echo "Logged in using an API key"; exit 0; fi',
+    'if [ "$1" = "debug" ]; then echo \'{"models":[{"slug":"gpt-5","supported_reasoning_levels":[]}]}\'; exit 0; fi',
+    'exit 0',
+  ].join('\n'), { mode: 0o755 });
+  const oldPath = process.env.PATH;
+  process.env.PATH = `${bin}${path.delimiter}${oldPath || ''}`;
+  try {
+    assert.equal(await run(
+      'configure', 'codex',
+      '--main', 'kenari/narrow', '--review', 'inherit', '--subagents', 'inherit', '--yes',
+    ), 0);
+    output = []; stdout = []; stderr = [];
+    assert.equal(await run('codex', '--version'), 0);
+    // runTool serves both tools. Telling a Codex user what Claude Code offers is
+    // describing a control they are not looking at.
+    assert.doesNotMatch(stderrLogs(), /Claude Code offers/);
+    assert.match(stderrLogs(), /effort high, xhigh/);
+  } finally {
+    process.env.PATH = oldPath;
+  }
+});
+
+test('status renders effort record and distinguishes unreported from none', async () => {
+  const { saveState } = await import('../src/store.js');
+  const base = { version: 2, migration: {}, tools: {} };
+  saveState({ ...base, effort: { 'gpt-5-6-luna': {
+    model: 'gpt-5-6-luna', requested: null, gated: null, status: 200, at: Date.now() - 240000,
+  } } });
+  assert.equal(await run('status'), 0);
+  assert.match(logs(), /effort\s+kenari\/gpt-5-6-luna requested=unset gated=unreported 200 4m ago/);
+  output = [];
+  assert.equal(await run('status', '--json'), 0);
+  const json = JSON.parse(logs());
+  assert.deepEqual(json.effort['gpt-5-6-luna'], {
+    model: 'gpt-5-6-luna', requested: null, gated: null, status: 200,
+    at: json.effort['gpt-5-6-luna'].at,
+  });
+
+  output = [];
+  saveState({ ...base, effort: { 'gpt-5-6-luna': {
+    model: 'gpt-5-6-luna', requested: 'max', gated: 'none', status: 200, at: Date.now(),
+  } } });
+  assert.equal(await run('status'), 0);
+  assert.match(logs(), /effort\s+kenari\/gpt-5-6-luna requested=max gated=none 200 0s ago/);
+
+  // A client that picked the none level must not read the same as one that picked
+  // nothing at all. This is the pair the previous wording collapsed.
+  output = [];
+  saveState({ ...base, effort: { 'gpt-5-6-luna': {
+    model: 'gpt-5-6-luna', requested: 'none', gated: 'none', status: 200, at: Date.now(),
+  } } });
+  assert.equal(await run('status'), 0);
+  assert.match(logs(), /requested=none gated=none/);
+  assert.doesNotMatch(logs(), /requested=unset/);
+});
+
+test('status omits effort when no record exists', async () => {
+  const { saveState } = await import('../src/store.js');
+  saveState({ version: 2, migration: {}, tools: {} });
+  assert.equal(await run('status'), 0);
+  assert.doesNotMatch(logs(), /^effort\s/m);
+});
+
+test('models JSON uses reasoning options and limits', async () => {
   process.env.KENARI_BASE_URL = await stubCatalog(CATALOG);
   process.env.KENARI_ALLOW_HTTP = '1';
   const { setKey } = await import('../src/store.js');
@@ -208,6 +346,42 @@ test('models JSON uses kenari prefix and includes limits', async () => {
   assert.equal(await run('models', '--json'), 0);
   assert.match(logs(), /"id": "kenari\/glm-5-2"/);
   assert.match(logs(), /"output_limit": 32000/);
+  assert.match(logs(), /"reasoning_options": \[\n\s+"high",\n\s+"xhigh"\n\s+\]/);
+  assert.doesNotMatch(logs(), /reasoning_efforts/);
+});
+
+test('models table renders unknown, unsupported, and advertised effort states', async () => {
+  process.env.KENARI_BASE_URL = await stubCatalog([
+    { id: 'unknown', pricing: {}, reasoning_options: undefined },
+    { id: 'unsupported', pricing: {}, reasoning_options: [] },
+    { id: 'listed', pricing: {}, reasoning_options: ['high', 'xhigh'] },
+  ]);
+  process.env.KENARI_ALLOW_HTTP = '1';
+  const { setKey } = await import('../src/store.js');
+  setKey('kn-testkey123');
+  assert.equal(await run('models'), 0);
+  // Anchored to the row, so a stray match elsewhere in the table cannot pass these.
+  assert.match(logs(), /^kenari\/unknown\s.*\s\?$/m);
+  assert.match(logs(), /^kenari\/unsupported\s.*\sunsupported$/m);
+  assert.match(logs(), /^kenari\/listed\s.*\shigh, xhigh$/m);
+  // "none" is a level, not the empty set. A model advertising it must render it, and
+  // a model with no levels must not borrow the word.
+  assert.doesNotMatch(logs(), /^kenari\/unsupported\s.*\snone$/m);
+});
+
+test('models table renders none as the level it is, not as the empty set', async () => {
+  process.env.KENARI_BASE_URL = await stubCatalog([
+    { id: 'full', pricing: {}, reasoning_options: ['none', 'low', 'medium', 'high', 'xhigh', 'max'] },
+    { id: 'minimalist', pricing: {}, reasoning_options: ['minimal', 'low', 'medium', 'high'] },
+  ]);
+  process.env.KENARI_ALLOW_HTTP = '1';
+  const { setKey } = await import('../src/store.js');
+  setKey('kn-testkey123');
+  assert.equal(await run('models'), 0);
+  assert.match(logs(), /^kenari\/full\s.*\snone, low, medium, high, xhigh, max$/m);
+  // minimal is a real level on 5 production models and is outside the set the rest of
+  // this codebase assumes. It must survive to the display verbatim.
+  assert.match(logs(), /^kenari\/minimalist\s.*\sminimal, low, medium, high$/m);
 });
 
 test('reset leaves login but removes unused shared cache', async () => {
@@ -337,6 +511,77 @@ test('wrapper requires configuration outside a TTY', async () => {
   assert.match(logs(), /run: kenari configure claude/);
 });
 
+test('fixed slots print advertised effort capabilities and narrowing warning on stderr', async (t) => {
+  if (process.platform === 'win32') return t.skip('POSIX executable fixture');
+  const cases = [
+    { id: 'unknown', reasoning_options: undefined, line: 'effort unknown (gateway reports no capability)', warning: false },
+    { id: 'unsupported', reasoning_options: [], line: 'effort unsupported', warning: false },
+    { id: 'narrow', reasoning_options: ['high', 'xhigh'], line: 'effort high, xhigh', warning: true },
+    { id: 'full', reasoning_options: ['low', 'medium', 'high', 'xhigh', 'max'], line: 'effort low, medium, high, xhigh, max', warning: false },
+    { id: 'minimal', reasoning_options: ['minimal', 'low', 'medium', 'high', 'xhigh', 'max'], line: 'effort minimal, low, medium, high, xhigh, max', warning: false },
+  ];
+  for (const item of cases) {
+    output = [];
+    stdout = [];
+    stderr = [];
+    process.env.KENARI_BASE_URL = await stubCatalog([{ id: item.id, pricing: {}, reasoning_options: item.reasoning_options }]);
+    process.env.KENARI_ALLOW_HTTP = '1';
+    const { setKey } = await import('../src/store.js');
+    setKey('kn-testkey123');
+    const bin = path.join(home, `bin-${item.id}`);
+    fs.mkdirSync(bin, { recursive: true });
+    fs.writeFileSync(path.join(bin, 'claude'), '#!/bin/sh\nexit 0\n', { mode: 0o755 });
+    const oldPath = process.env.PATH;
+    process.env.PATH = `${bin}${path.delimiter}${oldPath || ''}`;
+    try {
+      assert.equal(await run(
+        'configure', 'claude',
+        '--main', 'native', '--opus', 'native', '--sonnet', `kenari/${item.id}`,
+        '--haiku', 'native', '--fable', 'native', '--subagents', 'native', '--yes',
+      ), 0);
+      output = [];
+      stdout = [];
+      stderr = [];
+      assert.equal(await run('claude', '--version'), 0);
+      assert.ok(
+        stderrLogs().includes(`kenari: sonnet -> kenari/${item.id}  ${item.line}`),
+        `${item.id}: got ${JSON.stringify(stderrLogs())}`,
+      );
+      assert.equal(stdoutLogs(), '', 'capability output must not corrupt stdout');
+      assert.equal(stderrLogs().includes('kenari: warning:'), item.warning, `${item.id} warning state`);
+      if (item.warning) {
+        assert.match(stderrLogs(), /high, xhigh, so the gateway adjusts the rest/);
+      }
+    } finally {
+      process.env.PATH = oldPath;
+    }
+  }
+});
+
+test('native-only wrapper prints no capability output', async (t) => {
+  if (process.platform === 'win32') return t.skip('POSIX executable fixture');
+  const bin = path.join(home, 'native-only-bin');
+  fs.mkdirSync(bin, { recursive: true });
+  fs.writeFileSync(path.join(bin, 'claude'), '#!/bin/sh\nexit 0\n', { mode: 0o755 });
+  const oldPath = process.env.PATH;
+  process.env.PATH = `${bin}${path.delimiter}${oldPath || ''}`;
+  try {
+    assert.equal(await run(
+      'configure', 'claude',
+      '--main', 'native', '--opus', 'native', '--sonnet', 'native',
+      '--haiku', 'native', '--fable', 'native', '--subagents', 'native', '--yes',
+    ), 0);
+    output = [];
+    stdout = [];
+    stderr = [];
+    assert.equal(await run('claude', '--version'), 0);
+    assert.doesNotMatch(stderrLogs(), /effort|capability/);
+    assert.equal(stdoutLogs(), '');
+  } finally {
+    process.env.PATH = oldPath;
+  }
+});
+
 test('native wrapper preserves original child exit code', async (t) => {
   if (process.platform === 'win32') return t.skip('POSIX executable fixture');
   const bin = path.join(home, 'bin');
@@ -360,5 +605,79 @@ test('native wrapper preserves original child exit code', async (t) => {
     assert.equal(await run('claude', '--version'), 7);
   } finally {
     process.env.PATH = oldPath;
+  }
+});
+
+test('two slots on different models each report their own capability, aligned', async (t) => {
+  if (process.platform === 'win32') return t.skip('POSIX executable fixture');
+  process.env.KENARI_BASE_URL = await stubCatalog([
+    { id: 'aa', pricing: {}, reasoning_options: ['high', 'xhigh'] },
+    { id: 'bbbbbbbbbbbb', pricing: {}, reasoning_options: ['low', 'medium', 'high', 'xhigh', 'max'] },
+  ]);
+  process.env.KENARI_ALLOW_HTTP = '1';
+  const { setKey } = await import('../src/store.js');
+  setKey('kn-testkey123');
+  const bin = path.join(home, 'bin-two');
+  fs.mkdirSync(bin, { recursive: true });
+  fs.writeFileSync(path.join(bin, 'claude'), '#!/bin/sh\nexit 0\n', { mode: 0o755 });
+  const oldPath = process.env.PATH;
+  process.env.PATH = `${bin}${path.delimiter}${oldPath || ''}`;
+  try {
+    assert.equal(await run(
+      'configure', 'claude',
+      '--main', 'native', '--opus', 'kenari/aa', '--sonnet', 'kenari/bbbbbbbbbbbb',
+      '--haiku', 'native', '--fable', 'native', '--subagents', 'native', '--yes',
+    ), 0);
+    output = []; stdout = []; stderr = [];
+    assert.equal(await run('claude', '--version'), 0);
+    const rows = stderr.filter((line) => line.includes(' -> kenari/'));
+    assert.equal(rows.length, 2);
+    // Each slot reports ITS OWN model. Indexing the catalog instead of matching by id
+    // gives both rows the first model's levels, which a single-slot test cannot see.
+    const opus = rows.find((line) => line.includes('kenari/aa '));
+    const sonnet = rows.find((line) => line.includes('kenari/bbbbbbbbbbbb'));
+    assert.ok(opus.endsWith('effort high, xhigh'), opus);
+    assert.ok(sonnet.endsWith('effort low, medium, high, xhigh, max'), sonnet);
+    // The model column is padded to the widest id, so "effort" starts at one column.
+    assert.equal(opus.indexOf('effort'), sonnet.indexOf('effort'));
+    // Only the narrow model warns. The other advertises all five.
+    const warnings = stderr.filter((line) => line.includes('warning: Claude Code offers'));
+    assert.equal(warnings.length, 1);
+    assert.match(warnings[0], /aa advertises only/);
+  } finally {
+    process.env.PATH = oldPath;
+  }
+});
+
+test('a launch that dies on a bad environment prints no capability advice first', async (t) => {
+  if (process.platform === 'win32') return t.skip('POSIX executable fixture');
+  process.env.KENARI_BASE_URL = await stubCatalog([
+    { id: 'narrow', pricing: {}, reasoning_options: ['high', 'xhigh'] },
+  ]);
+  process.env.KENARI_ALLOW_HTTP = '1';
+  const { setKey } = await import('../src/store.js');
+  setKey('kn-testkey123');
+  const bin = path.join(home, 'bin-ambig');
+  fs.mkdirSync(bin, { recursive: true });
+  fs.writeFileSync(path.join(bin, 'claude'), '#!/bin/sh\nexit 0\n', { mode: 0o755 });
+  const oldPath = process.env.PATH;
+  process.env.PATH = `${bin}${path.delimiter}${oldPath || ''}`;
+  try {
+    assert.equal(await run(
+      'configure', 'claude',
+      '--main', 'native', '--opus', 'native', '--sonnet', 'kenari/narrow',
+      '--haiku', 'native', '--fable', 'native', '--subagents', 'native', '--yes',
+    ), 0);
+    output = []; stdout = []; stderr = [];
+    // buildClaudeLaunch refuses this, so the launch never happens. Printing capability
+    // advice first made a real run read as though the advice caused the error.
+    process.env.ANTHROPIC_BASE_URL = 'https://example.invalid';
+    assert.equal(await run('claude', '--version'), 1);
+    assert.match(logs(), /routing environment is ambiguous/);
+    assert.doesNotMatch(stderrLogs(), /effort high, xhigh/);
+    assert.doesNotMatch(stderrLogs(), /warning: Claude Code offers/);
+  } finally {
+    process.env.PATH = oldPath;
+    delete process.env.ANTHROPIC_BASE_URL;
   }
 });

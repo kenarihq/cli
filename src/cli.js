@@ -10,6 +10,7 @@ import {
   getKey,
   loadState,
   maskKey,
+  recordEffort,
   removeFile,
   setKey,
   withLock,
@@ -22,6 +23,8 @@ import {
   saveConfig,
 } from './config.js';
 import {
+  formatAge,
+  formatEffortOptions,
   loadCatalogCache,
   loadCatalogForLaunch,
   writeMergedCodexCatalog,
@@ -342,6 +345,19 @@ function cacheAge(cache) {
   return Math.max(0, Date.now() - Date.parse(cache.fetched_at));
 }
 
+function effortRecords(state) {
+  return Object.values(state.effort).sort((a, b) => b.at - a.at);
+}
+
+function effortSummary(effort) {
+  // Neither absent value borrows the word none, because none is itself a level a
+  // client can pick and a gateway can apply. "unset" is a client that sent no level,
+  // "unreported" is a gateway that sent no header, and both differ from "none".
+  // The kenari/ prefix matches how the model is named everywhere else the user sees it.
+  return `kenari/${effort.model} requested=${effort.requested ?? 'unset'} `
+    + `gated=${effort.gated ?? 'unreported'} ${effort.status} ${formatAge(Date.now() - effort.at)} ago`;
+}
+
 function offlineStatus() {
   const config = loadConfig();
   const cache = loadCatalogCache();
@@ -365,6 +381,7 @@ function offlineStatus() {
       models: cache.models.length,
     } : null,
     migration_conflicts: [...storedMigrationConflicts(), ...detectOrphanedV1Signatures()],
+    effort: loadState().effort,
     tools,
   };
 }
@@ -428,6 +445,11 @@ async function cmdStatus(argv) {
   }
   console.log(`credential  ${status.credential}`);
   console.log(`catalog     ${status.cache ? `${status.cache.models} models, age ${Math.round(status.cache.age_ms / 1000)}s` : 'missing'}`);
+  // One line per model, newest first. The pre-launch banner lists every fixed slot, so
+  // reporting a single global record could not answer what that banner raises.
+  for (const record of effortRecords(status)) {
+    console.log(`effort      ${effortSummary(record)}`);
+  }
   for (const conflict of status.migration_conflicts) {
     console.log(`conflict    ${conflict.tool}.${conflict.key}`);
   }
@@ -452,7 +474,6 @@ async function cmdModels(argv) {
     const result = await loadCatalogForLaunch({
       key,
       requireKenari: true,
-      maxAgeMs: 0,
     });
     cache = result.cache;
     if (result.warning) console.log(`warning: ${result.warning}`);
@@ -469,20 +490,24 @@ async function cmdModels(argv) {
       output_price: model.output_price,
       context_limit: model.context_limit,
       output_limit: model.output_limit,
-      reasoning_efforts: model.reasoning_efforts,
+      reasoning_options: model.reasoning_options,
     })),
   };
   if (flags.json) {
     console.log(JSON.stringify(output, null, 2));
     return 0;
   }
-  console.log(`${'id'.padEnd(30)} ${'in /1M'.padStart(12)} ${'out /1M'.padStart(12)} ${'context'.padStart(10)} ${'output'.padStart(10)}`);
+  console.log(`${'id'.padEnd(30)} ${'in /1M'.padStart(12)} ${'out /1M'.padStart(12)} ${'context'.padStart(10)} ${'output'.padStart(10)} effort`);
   for (const model of output.models) {
+    // "?" rather than "none" for a narrow column: none is itself a level several models
+    // advertise, so the same word in one column would mean two different things.
+    const effort = formatEffortOptions(model.reasoning_options, '?');
     console.log(
       `${model.id.padEnd(30)} ${formatRp(model.input_price).padStart(12)} `
       + `${formatRp(model.output_price).padStart(12)} `
       + `${String(model.context_limit ?? '-').padStart(10)} `
-      + `${String(model.output_limit ?? '-').padStart(10)}`,
+      + `${String(model.output_limit ?? '-').padStart(10)} `
+      + effort,
     );
   }
   console.log(`cache age: ${Math.round(output.age_ms / 1000)}s`);
@@ -513,6 +538,48 @@ async function ensureConfigured(tool) {
   return { config, toolConfig: getToolConfig(config, tool) };
 }
 
+// Claude Code's /effort offers these five for every model, regardless of what the
+// model can actually do. That mismatch is what the warning below is about.
+const CLAUDE_EFFORT_LEVELS = ['low', 'medium', 'high', 'xhigh', 'max'];
+
+function printEffortCapabilities(tool, toolConfig, cache) {
+  const fixed = Object.entries(toolConfig.roles)
+    .filter(([, role]) => role.mode === 'fixed')
+    .map(([slot, role]) => {
+      const modelId = role.model.slice('kenari/'.length);
+      return { slot, modelId, model: cache?.models.find((item) => item.id === modelId) };
+    });
+  if (!fixed.length) return;
+  const slotWidth = Math.max(...fixed.map(({ slot }) => slot.length));
+  const modelWidth = Math.max(...fixed.map(({ modelId }) => `kenari/${modelId}`.length));
+  for (const { slot, modelId, model } of fixed) {
+    const effort = formatEffortOptions(
+      model?.reasoning_options,
+      'unknown (gateway reports no capability)',
+    );
+    console.error(
+      `kenari: ${slot.padEnd(slotWidth)} -> ${`kenari/${modelId}`.padEnd(modelWidth)}  effort ${effort}`,
+    );
+  }
+  // Codex reads its levels from the catalog we generate, so its picker already offers
+  // exactly what the model advertises and nothing can narrow. Only Claude Code shows a
+  // fixed five regardless of the model.
+  if (tool !== 'claude') return;
+  // Once per model, not once per slot. A user routing six slots at one model was
+  // getting the same three lines six times.
+  const warned = new Set();
+  for (const { modelId, model } of fixed) {
+    const options = model?.reasoning_options;
+    if (!Array.isArray(options) || !options.length || warned.has(modelId)) continue;
+    const advertised = new Set(options);
+    if (CLAUDE_EFFORT_LEVELS.every((level) => advertised.has(level))) continue;
+    warned.add(modelId);
+    console.error(`kenari: warning: Claude Code offers low through max; ${modelId} advertises only`);
+    console.error(`        ${options.join(', ')}, so the gateway adjusts the rest. Run kenari status to see`);
+    console.error('        which level was applied.');
+  }
+}
+
 async function runTool(tool, args) {
   const { config, toolConfig } = await ensureConfigured(tool);
   const requireKenari = hasKenariRoutes(config, tool);
@@ -536,7 +603,15 @@ async function runTool(tool, args) {
   const nativeBase = tool === 'codex'
     ? resolveCodexNativeBase(binary, process.env)
     : (process.env.KENARI_CLAUDE_NATIVE_BASE_URL || 'https://api.anthropic.com');
-  const runtimeBuilder = tool === 'codex' ? buildCodexLaunch : buildClaudeLaunch;
+  const buildLaunch = tool === 'codex' ? buildCodexLaunch : buildClaudeLaunch;
+  // Print only once the launch is known to be viable. Printed earlier, a run that then
+  // died on an ambiguous environment led with several lines of capability advice and
+  // ended in a fatal error, which reads as though the advice caused it.
+  const runtimeBuilder = (options) => {
+    const built = buildLaunch(options);
+    printEffortCapabilities(tool, toolConfig, cache);
+    return built;
+  };
   try {
     return await runWrappedTool({
       binary,
@@ -548,6 +623,9 @@ async function runTool(tool, args) {
         credential: key,
         catalog: cache,
         capabilityToken: tool === 'claude' ? randomBytes(32).toString('base64url') : null,
+        // Diagnostic, never load bearing: a failed write must not disturb the session,
+        // and nothing is printed because the tool owns the terminal from here.
+        onEffort: (record) => { recordEffort(record).catch(() => {}); },
       },
       runtimeBuilder,
       runtimeOptions: { toolConfig, catalogPath },

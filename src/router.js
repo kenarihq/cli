@@ -88,6 +88,30 @@ async function startRouterServer(options) {
   const capabilityToken = options.capabilityToken || null;
   const bodyLimit = options.bodyLimit ?? 64 * 1024 * 1024;
   const sockets = new Set();
+  const onEffort = typeof options.onEffort === 'function' ? options.onEffort : null;
+  // Keyed by model, not one shared key. Claude Code alternates slots inside a session,
+  // sonnet for the work and haiku for background tasks, so a single key would see every
+  // alternation as a change and report on every request for the whole session.
+  const lastEffort = new Map();
+
+  // Observe only. The gateway owns clamping and stripping and has a tested matrix for
+  // it; a router that adjusted the level here would make this record a lie.
+  function recordEffort(upstreamRes, body, model) {
+    const asked = body?.output_config?.effort;
+    const stamped = upstreamRes.headers['x-kenari-gated-effort'];
+    // Both stay verbatim. The level vocabulary is open (production advertises seven,
+    // including minimal), so validating or normalizing here would drop real values.
+    const requested = typeof asked === 'string' ? asked : null;
+    const gated = typeof stamped === 'string' ? stamped : null;
+    const status = upstreamRes.statusCode || 0;
+    // Three primitive compares, on a proxy that sees every request of a session. The
+    // record and its timestamp are built only when something actually changed, so an
+    // unchanged response costs no allocation and no serialization.
+    const last = lastEffort.get(model);
+    if (last && last.requested === requested && last.gated === gated && last.status === status) return;
+    lastEffort.set(model, { requested, gated, status });
+    try { onEffort({ model, requested, gated, status, at: Date.now() }); } catch {}
+  }
 
   const server = http.createServer(async (req, res) => {
     if (capabilityToken && req.headers['x-kenari-capability'] !== capabilityToken) {
@@ -152,6 +176,7 @@ async function startRouterServer(options) {
     }, (upstreamRes) => {
       const responseHeaders = safeHeaders(upstreamRes.headers, RESPONSE_STRIP);
       res.writeHead(upstreamRes.statusCode || 502, responseHeaders);
+      if (onEffort && isKenari) recordEffort(upstreamRes, body, id);
       const terminateDownstream = (error) => {
         if (!res.destroyed) res.destroy(error);
       };
@@ -259,6 +284,8 @@ export async function startRouter(options) {
         fail(childError(message.message));
       } else if (message?.type === 'debug' && typeof options.debug === 'function') {
         options.debug(message.message);
+      } else if (message?.type === 'effort' && typeof options.onEffort === 'function') {
+        try { options.onEffort(message.record); } catch {}
       }
     });
     child.send({
@@ -272,6 +299,7 @@ export async function startRouter(options) {
         bodyLimit: options.bodyLimit,
         compatibility: options.compatibility || null,
         debug: typeof options.debug === 'function',
+        onEffort: typeof options.onEffort === 'function',
       },
     });
   });
@@ -318,6 +346,9 @@ async function runRouterChild() {
         ...message.options,
         debug: message.options.debug
           ? (line) => process.send?.({ type: 'debug', message: line })
+          : null,
+        onEffort: message.options.onEffort
+          ? (record) => process.send?.({ type: 'effort', record })
           : null,
       };
       router = await startRouterServer(childOptions);

@@ -55,15 +55,15 @@ export function codexKenariModels(cache, nativeModels = []) {
     const normalizedId = normalizeModelId(model.id);
     const template = nativeModels.find((native) => normalizeModelId(native.slug) === normalizedId)
       || fallbackTemplate;
-    const efforts = model.reasoning_efforts?.length
-      ? model.reasoning_efforts
-      : (template.supported_reasoning_levels || []).map((level) => level.effort);
+    const efforts = model.reasoning_options == null
+      ? (template.supported_reasoning_levels || []).map((level) => level.effort)
+      : model.reasoning_options;
     const entry = {
       ...template,
       slug: `kenari/${model.id}`,
       display_name: `Kenari ${model.id}`,
       description: `Kenari route for ${model.id}`,
-      default_reasoning_level: efforts[0] || template.default_reasoning_level,
+      default_reasoning_level: efforts[0] || (efforts.length ? template.default_reasoning_level : undefined),
       supported_reasoning_levels: efforts.map((effort) => ({
         effort,
         description: `${effort} reasoning`,
