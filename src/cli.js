@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';

@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 // Narrow TOML patcher. Understands exactly two shapes:
 //   1. top-level string scalars (key = "value") before the first [header]
 //   2. whole tables addressed by exact header name

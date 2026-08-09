@@ -168,4 +168,11 @@ credential. Native routes keep working after logout.
 
 ## License
 
-MIT
+GPL-3.0-or-later. Forks and modified versions must ship their source under the same
+terms.
+
+Using the CLI imposes nothing on your own code. `kenari claude` runs Claude Code as a
+separate program, and this package exposes no importable module, so routing your work
+through it does not make your work a derivative of it.
+
+Versions 0.4.4 and earlier were released under MIT and stay MIT.
