@@ -607,8 +607,6 @@ async function runTool(tool, args) {
   if (warning) console.error(`warning: ${warning}`);
   if (requireKenari) assertSelectedModels(toolConfig, cache);
 
-  printEffortCapabilities(tool, toolConfig, cache);
-
   const binary = originalBinary(tool);
   let catalogPath = null;
   if (tool === 'codex' && cache) {
@@ -620,7 +618,15 @@ async function runTool(tool, args) {
   const nativeBase = tool === 'codex'
     ? resolveCodexNativeBase(binary, process.env)
     : (process.env.KENARI_CLAUDE_NATIVE_BASE_URL || 'https://api.anthropic.com');
-  const runtimeBuilder = tool === 'codex' ? buildCodexLaunch : buildClaudeLaunch;
+  const buildLaunch = tool === 'codex' ? buildCodexLaunch : buildClaudeLaunch;
+  // Print only once the launch is known to be viable. Printed earlier, a run that then
+  // died on an ambiguous environment led with several lines of capability advice and
+  // ended in a fatal error, which reads as though the advice caused it.
+  const runtimeBuilder = (options) => {
+    const built = buildLaunch(options);
+    printEffortCapabilities(tool, toolConfig, cache);
+    return built;
+  };
   try {
     return await runWrappedTool({
       binary,

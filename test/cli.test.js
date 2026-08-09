@@ -256,7 +256,14 @@ test('the narrowing warning names Codex when Codex is what is launching', async 
   setKey('kn-testkey123');
   const bin = path.join(home, 'bin-codex');
   fs.mkdirSync(bin, { recursive: true });
-  fs.writeFileSync(path.join(bin, 'codex'), '#!/bin/sh\nexit 0\n', { mode: 0o755 });
+  // The banner prints just before spawn, so the fixture has to survive the whole codex
+  // launch path: login status for the native base, then debug models for the catalog.
+  fs.writeFileSync(path.join(bin, 'codex'), [
+    '#!/bin/sh',
+    'if [ "$1" = "login" ]; then echo "Logged in using an API key"; exit 0; fi',
+    'if [ "$1" = "debug" ]; then echo \'{"models":[{"slug":"gpt-5","supported_reasoning_levels":[]}]}\'; exit 0; fi',
+    'exit 0',
+  ].join('\n'), { mode: 0o755 });
   const oldPath = process.env.PATH;
   process.env.PATH = `${bin}${path.delimiter}${oldPath || ''}`;
   try {
@@ -265,7 +272,7 @@ test('the narrowing warning names Codex when Codex is what is launching', async 
       '--main', 'kenari/narrow', '--review', 'inherit', '--subagents', 'inherit', '--yes',
     ), 0);
     output = []; stdout = []; stderr = [];
-    await run('codex', '--version');
+    assert.equal(await run('codex', '--version'), 0);
     // runTool serves both tools. Telling a Codex user what Claude Code offers is
     // describing a control they are not looking at.
     assert.doesNotMatch(stderrLogs(), /Claude Code offers/);
