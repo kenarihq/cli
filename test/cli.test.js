@@ -528,7 +528,10 @@ test('fixed slots print advertised effort capabilities and narrowing warning on 
       stdout = [];
       stderr = [];
       assert.equal(await run('claude', '--version'), 0);
-      assert.ok(stderrLogs().includes(`kenari: sonnet -> kenari/${item.id}  ${item.line}`));
+      assert.ok(
+        stderrLogs().includes(`kenari: sonnet -> kenari/${item.id}  ${item.line}`),
+        `${item.id}: got ${JSON.stringify(stderrLogs())}`,
+      );
       assert.equal(stdoutLogs(), '', 'capability output must not corrupt stdout');
       assert.equal(stderrLogs().includes('kenari: warning:'), item.warning, `${item.id} warning state`);
       if (item.warning) {
