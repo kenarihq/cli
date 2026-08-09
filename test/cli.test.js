@@ -7,8 +7,12 @@ import http from 'node:http';
 
 let home;
 let output;
+let stdout;
+let stderr;
 const servers = [];
 const logs = () => output.join('\n');
+const stdoutLogs = () => stdout.join('\n');
+const stderrLogs = () => stderr.join('\n');
 
 beforeEach(() => {
   home = fs.mkdtempSync(path.join(os.tmpdir(), 'kenari-cli-v2-'));
@@ -21,6 +25,8 @@ beforeEach(() => {
   delete process.env.ANTHROPIC_AUTH_TOKEN;
   delete process.env.ANTHROPIC_API_KEY;
   output = [];
+  stdout = [];
+  stderr = [];
 });
 
 after(() => {
@@ -30,8 +36,16 @@ after(() => {
 async function capture(fn) {
   const originalLog = console.log;
   const originalError = console.error;
-  console.log = (...args) => output.push(args.join(' '));
-  console.error = (...args) => output.push(args.join(' '));
+  console.log = (...args) => {
+    const line = args.join(' ');
+    output.push(line);
+    stdout.push(line);
+  };
+  console.error = (...args) => {
+    const line = args.join(' ');
+    output.push(line);
+    stderr.push(line);
+  };
   try {
     return await fn();
   } finally {
@@ -411,6 +425,74 @@ test('askSecret resolves empty on EOF so an abandoned prompt fails loudly', asyn
 test('wrapper requires configuration outside a TTY', async () => {
   assert.equal(await run('claude', '--version'), 1);
   assert.match(logs(), /run: kenari configure claude/);
+});
+
+test('fixed slots print advertised effort capabilities and narrowing warning on stderr', async (t) => {
+  if (process.platform === 'win32') return t.skip('POSIX executable fixture');
+  const cases = [
+    { id: 'unknown', reasoning_options: undefined, line: 'effort unknown (gateway reports no capability)', warning: false },
+    { id: 'unsupported', reasoning_options: [], line: 'effort unsupported', warning: false },
+    { id: 'narrow', reasoning_options: ['high', 'xhigh'], line: 'effort high, xhigh', warning: true },
+    { id: 'full', reasoning_options: ['low', 'medium', 'high', 'xhigh', 'max'], line: 'effort low, medium, high, xhigh, max', warning: false },
+    { id: 'minimal', reasoning_options: ['minimal', 'low', 'medium', 'high', 'xhigh', 'max'], line: 'effort minimal, low, medium, high, xhigh, max', warning: false },
+  ];
+  for (const item of cases) {
+    output = [];
+    stdout = [];
+    stderr = [];
+    process.env.KENARI_BASE_URL = await stubCatalog([{ id: item.id, pricing: {}, reasoning_options: item.reasoning_options }]);
+    process.env.KENARI_ALLOW_HTTP = '1';
+    const { setKey } = await import('../src/store.js');
+    setKey('kn-testkey123');
+    const bin = path.join(home, `bin-${item.id}`);
+    fs.mkdirSync(bin, { recursive: true });
+    fs.writeFileSync(path.join(bin, 'claude'), '#!/bin/sh\nexit 0\n', { mode: 0o755 });
+    const oldPath = process.env.PATH;
+    process.env.PATH = `${bin}${path.delimiter}${oldPath || ''}`;
+    try {
+      assert.equal(await run(
+        'configure', 'claude',
+        '--main', 'native', '--opus', 'native', '--sonnet', `kenari/${item.id}`,
+        '--haiku', 'native', '--fable', 'native', '--subagents', 'native', '--yes',
+      ), 0);
+      output = [];
+      stdout = [];
+      stderr = [];
+      assert.equal(await run('claude', '--version'), 0);
+      assert.ok(stderrLogs().includes(`kenari: sonnet -> kenari/${item.id}  ${item.line}`));
+      assert.equal(stdoutLogs(), '', 'capability output must not corrupt stdout');
+      assert.equal(stderrLogs().includes('kenari: warning:'), item.warning, `${item.id} warning state`);
+      if (item.warning) {
+        assert.match(stderrLogs(), /high, xhigh, so the gateway adjusts the rest/);
+      }
+    } finally {
+      process.env.PATH = oldPath;
+    }
+  }
+});
+
+test('native-only wrapper prints no capability output', async (t) => {
+  if (process.platform === 'win32') return t.skip('POSIX executable fixture');
+  const bin = path.join(home, 'native-only-bin');
+  fs.mkdirSync(bin, { recursive: true });
+  fs.writeFileSync(path.join(bin, 'claude'), '#!/bin/sh\nexit 0\n', { mode: 0o755 });
+  const oldPath = process.env.PATH;
+  process.env.PATH = `${bin}${path.delimiter}${oldPath || ''}`;
+  try {
+    assert.equal(await run(
+      'configure', 'claude',
+      '--main', 'native', '--opus', 'native', '--sonnet', 'native',
+      '--haiku', 'native', '--fable', 'native', '--subagents', 'native', '--yes',
+    ), 0);
+    output = [];
+    stdout = [];
+    stderr = [];
+    assert.equal(await run('claude', '--version'), 0);
+    assert.doesNotMatch(stderrLogs(), /effort|capability/);
+    assert.equal(stdoutLogs(), '');
+  } finally {
+    process.env.PATH = oldPath;
+  }
 });
 
 test('native wrapper preserves original child exit code', async (t) => {
