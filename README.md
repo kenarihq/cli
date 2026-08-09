@@ -128,6 +128,43 @@ kenari configure codex \
 Unprefixed model IDs always route to the native provider. `kenari/` model IDs
 always route to Kenari. Routing never falls back between providers.
 
+### Reasoning effort per slot
+
+A fixed slot can pin a reasoning level, which every request routed to that slot
+then uses:
+
+```bash
+kenari configure claude \
+  --main native \
+  --opus native \
+  --sonnet kenari/gpt-5-6-luna --sonnet-effort max \
+  --haiku native \
+  --fable native \
+  --subagents native \
+  --yes
+```
+
+`kenari configure` also offers the pin interactively after you pick a model, and
+lists what that model advertises.
+
+The pin wins over whatever the session sends. Claude Code's `/effort` is a single
+session-wide setting, so it cannot ask for a level on one slot alone. That matters
+when the orchestrator is native and only the delegated slot runs through Kenari:
+raising the session level would change the native model too, and pay for it. The
+pin is the per-slot control Claude Code has no way to express.
+
+Kenari never clamps or validates a level. The gateway owns that, and clamps a
+level the model does not advertise to the nearest one it does. `kenari status`
+reports both, so a pin that got adjusted is visible rather than silent:
+
+```
+effort      kenari/glm-5-2 requested=max (pinned) gated=xhigh 200 4m ago
+```
+
+`requested` is what reached the gateway, `gated` is what the gateway applied.
+`unset` means no level was sent, and `unreported` means the gateway sent no
+header, which is distinct from the `none` level.
+
 ## Files
 
 Kenari owns these files:

@@ -90,6 +90,7 @@ function validEffort(value) {
     requested: value.requested,
     gated: value.gated,
     status: value.status,
+    pinned: value.pinned === true,
     at: value.at,
   };
 }
