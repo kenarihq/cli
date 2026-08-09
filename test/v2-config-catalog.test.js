@@ -100,6 +100,24 @@ test('a catalog cache of any other version is discarded, never fatal', (t) => {
   }
 });
 
+test('a cached model missing the field reads as unknown, not undefined', (t) => {
+  const dir = tempHome(t);
+  // validateCatalogCache checks ids, not per-model fields, so a version 2 file whose
+  // models predate the field loads fine. Consumers branch on === null and would then
+  // hit .length on undefined, crashing a launch on a display line.
+  fs.writeFileSync(path.join(dir, 'model-cache.json'), JSON.stringify({
+    version: 2,
+    fetched_at: new Date().toISOString(),
+    gateway: 'https://gateway.example',
+    models: [{ id: 'glm-5-2' }, { id: 'gpt-5-6-luna', reasoning_options: ['high', 'high'] }],
+  }));
+  const cache = loadCatalogCache();
+  assert.equal(cache.models[0].reasoning_options, null);
+  assert.equal(cache.models[0].reasoning, false);
+  // The same normalization the fetch path applies, so both entry points agree.
+  assert.deepEqual(cache.models[1].reasoning_options, ['high']);
+});
+
 test('catalog refresh failure falls back with cache age', async (t) => {
   tempHome(t);
   const fetchedAt = new Date(Date.now() - 3 * 60 * 60 * 1000 - 30_000).toISOString();

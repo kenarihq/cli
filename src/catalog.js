@@ -9,6 +9,14 @@ function numberOrNull(value) {
   return Number.isFinite(value) && value >= 0 ? value : null;
 }
 
+// Null means the gateway published nothing, an array means it published a list. Every
+// model leaving this module holds that invariant, including one read back from a file
+// written before the field existed, so no consumer has to guard for undefined.
+function normalizeOptions(value) {
+  if (!Array.isArray(value)) return null;
+  return [...new Set(value.filter((v) => typeof v === 'string'))];
+}
+
 export function validateCatalogResponse(body, gateway) {
   if (!body || typeof body !== 'object' || !Array.isArray(body.data)) {
     throw new KenariError('Kenari catalog has an unsupported schema');
@@ -28,9 +36,7 @@ export function validateCatalogResponse(body, gateway) {
       output_price: free ? 0 : knownUnit ? numberOrNull(pricing.output) : null,
       context_limit: numberOrNull(model.context_length),
       output_limit: numberOrNull(model.output_limit ?? model.max_output_tokens),
-      reasoning_options: Array.isArray(model.reasoning_options)
-        ? [...new Set(model.reasoning_options.filter((v) => typeof v === 'string'))]
-        : null,
+      reasoning_options: normalizeOptions(model.reasoning_options),
       reasoning: model.reasoning === true,
       compatibility: model.compatibility && typeof model.compatibility === 'object'
         ? model.compatibility
@@ -56,6 +62,8 @@ export function validateCatalogCache(value) {
       throw new KenariError('model-cache.json contains an invalid or duplicate model');
     }
     ids.add(model.id);
+    model.reasoning_options = normalizeOptions(model.reasoning_options);
+    model.reasoning = model.reasoning === true;
   }
   return value;
 }
