@@ -6,6 +6,7 @@ import {
   genPkce,
   genState,
   buildLoopbackUrl,
+  browserCommand,
   startCallbackServer,
   handleCallbackRequest,
 } from '../src/oauth.js';
@@ -43,6 +44,40 @@ test('buildLoopbackUrl: has challenge, state, port, host and a valid integer por
   const port = Number(u.searchParams.get('port'));
   assert.ok(Number.isInteger(port) && port > 0);
   assert.equal(port, 54321);
+});
+
+// The login URL always carries `&` and `?`, both of which a Windows shell eats.
+// Every platform cell must therefore pass the URL as one untouched argv entry
+// and must not route it through a shell: `cmd /c start "" <url>` opened the URL
+// cut at the first `&`, so /cli-auth saw only the challenge and answered
+// "This login link is invalid" on every Windows run.
+test('browserCommand: every platform passes the URL as one verbatim argv entry, never through a shell', () => {
+  const url = buildLoopbackUrl('https://kenari.id', {
+    challenge: 'E9Melhoa2OwvFrEMTJguCHaoeK1t8URWbuGJSstw-cM',
+    state: genState(),
+    port: 54321,
+    host: 'DESKTOP-A1B2C3',
+  });
+  assert.ok(url.includes('&') && url.includes('?'), 'premise: the login URL carries shell metacharacters');
+
+  const shells = /^(cmd|cmd\.exe|command\.com|powershell|powershell\.exe|pwsh|sh|bash|zsh)$/i;
+  const cells = [
+    { platform: 'darwin', file: 'open' },
+    { platform: 'win32', file: 'rundll32.exe' },
+    { platform: 'linux', file: 'xdg-open' },
+    { platform: 'freebsd', file: 'xdg-open' },
+  ];
+  for (const cell of cells) {
+    const { file, args } = browserCommand(cell.platform, url);
+    assert.equal(file, cell.file, `${cell.platform}: launcher`);
+    assert.ok(!shells.test(file), `${cell.platform}: must not launch a shell`);
+    assert.equal(args.filter((a) => a === url).length, 1, `${cell.platform}: URL passed verbatim, exactly once`);
+    for (const arg of args) {
+      if (arg === url) continue;
+      assert.ok(!arg.includes(url), `${cell.platform}: URL must not be embedded in a larger argument`);
+      assert.ok(!/[&"^%]/.test(arg), `${cell.platform}: no shell metacharacters in the other arguments`);
+    }
+  }
 });
 
 test('callback server: wrong state is rejected and keeps listening; right state resolves with the code', async () => {

@@ -33,7 +33,7 @@ import {
 import { fetchCatalog, formatRp } from './gateway.js';
 import { ask, askSecret, askYesNo, pickNumber } from './prompt.js';
 import { gatewayBase, modelCachePath, runtimeDir } from './paths.js';
-import { genPkce, genState, buildLoopbackUrl, startCallbackServer } from './oauth.js';
+import { genPkce, genState, buildLoopbackUrl, browserCommand, startCallbackServer } from './oauth.js';
 import { resolveBinary, runWrappedTool } from './supervisor.js';
 import { buildClaudeLaunch } from './runtime/claude.js';
 import {
@@ -691,10 +691,8 @@ const LOGIN_INTERRUPT = Symbol('login-interrupt');
 
 function openBrowser(url) {
   try {
-    let child;
-    if (process.platform === 'darwin') child = spawn('open', [url], { detached: true, stdio: 'ignore' });
-    else if (process.platform === 'win32') child = spawn('cmd', ['/c', 'start', '', url], { detached: true, stdio: 'ignore', windowsHide: true });
-    else child = spawn('xdg-open', [url], { detached: true, stdio: 'ignore' });
+    const { file, args } = browserCommand(process.platform, url);
+    const child = spawn(file, args, { detached: true, stdio: 'ignore', windowsHide: true });
     child.on('error', () => {});
     child.unref();
   } catch {}
