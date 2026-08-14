@@ -21,6 +21,23 @@ export function buildLoopbackUrl(base, { challenge, state, port, host }) {
     `&port=${port}&host=${encodeURIComponent(host)}`;
 }
 
+// How to hand the login URL to the desktop browser, per platform. Kept pure and
+// exported so the platform matrix is testable without spawning anything.
+//
+// Windows must NOT go through cmd.exe. There, an unquoted `&` is a command
+// separator and `%NAME%` expands, and node/libuv only quotes an argument that
+// contains a space, tab or quote, so `cmd /c start "" <url>` shipped the URL
+// raw: cmd opened `...?challenge=abc` and tried to run `state=...`, `port=...`
+// and `host=...` as commands. The browser landed on /cli-auth with only the
+// challenge and the page answered "This login link is invalid" every time.
+// rundll32 is a real executable, so the URL stays one argv entry with no shell
+// parsing at all.
+export function browserCommand(platform, url) {
+  if (platform === 'darwin') return { file: 'open', args: [url] };
+  if (platform === 'win32') return { file: 'rundll32.exe', args: ['url.dll,FileProtocolHandler', url] };
+  return { file: 'xdg-open', args: [url] };
+}
+
 // Self-contained: never reflects the code or a key. Just tells the person to
 // go back to the terminal.
 const CALLBACK_HTML = `<!doctype html>
