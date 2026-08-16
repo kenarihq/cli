@@ -15,13 +15,22 @@ const DEFAULT_PATHEXT = '.COM;.EXE;.BAT;.CMD';
 // `kenari claude` could not start on Windows at all. There is no bare-name fallback
 // here on purpose: an extensionless file is not runnable on Windows, so returning it
 // would only produce that same ENOENT one layer later instead of a clear message.
+// PATHEXT is conventionally uppercase while npm writes `claude.cmd` in lowercase, so
+// each extension is tried in both cases. A normal Windows filesystem is case
+// insensitive and would match either, but a directory can be marked case sensitive
+// through WSL interop, and there the case has to be right.
 export function binaryCandidates(name, env = process.env, platform = process.platform) {
   if (platform !== 'win32' || path.extname(name)) return [name];
-  return (env.PATHEXT || DEFAULT_PATHEXT)
-    .split(';')
-    .map((ext) => ext.trim())
-    .filter(Boolean)
-    .map((ext) => `${name}${ext}`);
+  const names = [];
+  for (const raw of (env.PATHEXT || DEFAULT_PATHEXT).split(';')) {
+    const ext = raw.trim();
+    if (!ext) continue;
+    for (const cased of [ext, ext.toLowerCase()]) {
+      const candidate = `${name}${cased}`;
+      if (!names.includes(candidate)) names.push(candidate);
+    }
+  }
+  return names;
 }
 
 // A .cmd or .bat is a script for the command interpreter, not an image CreateProcess

@@ -354,14 +354,18 @@ test('Codex native upstream fails closed when login method is unknown', () => {
 test('binaryCandidates asks for the Windows extensions and leaves POSIX alone', () => {
   assert.deepEqual(binaryCandidates('claude', {}, 'linux'), ['claude']);
   assert.deepEqual(binaryCandidates('claude', {}, 'darwin'), ['claude']);
-  assert.deepEqual(
-    binaryCandidates('claude', {}, 'win32'),
-    ['claude.COM', 'claude.EXE', 'claude.BAT', 'claude.CMD'],
-  );
+  // PATHEXT order is preserved, and each extension is offered in both cases because
+  // PATHEXT is uppercase while npm writes the shim in lowercase.
   assert.deepEqual(
     binaryCandidates('claude', { PATHEXT: '.EXE;.CMD' }, 'win32'),
-    ['claude.EXE', 'claude.CMD'],
+    ['claude.EXE', 'claude.exe', 'claude.CMD', 'claude.cmd'],
   );
+  // An executable is still preferred over a script: every .exe candidate comes first.
+  const order = binaryCandidates('claude', {}, 'win32');
+  assert.ok(order.indexOf('claude.exe') < order.indexOf('claude.cmd'));
+  assert.equal(new Set(order).size, order.length, 'no duplicate candidates');
+  // A lowercase PATHEXT entry must not produce the same name twice.
+  assert.deepEqual(binaryCandidates('claude', { PATHEXT: '.cmd' }, 'win32'), ['claude.cmd']);
   // A name that already carries an extension is taken as given.
   assert.deepEqual(binaryCandidates('claude.cmd', {}, 'win32'), ['claude.cmd']);
 });
