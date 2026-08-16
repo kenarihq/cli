@@ -35,7 +35,7 @@ import { ask, askSecret, askYesNo, pickNumber } from './prompt.js';
 import { gatewayBase, modelCachePath, runtimeDir } from './paths.js';
 import { genPkce, genState, buildLoopbackUrl, browserCommand, startCallbackServer } from './oauth.js';
 import { resolveBinary, runWrappedTool } from './supervisor.js';
-import { buildClaudeLaunch } from './runtime/claude.js';
+import { buildClaudeLaunch, findClaudeEnvConflicts } from './runtime/claude.js';
 import {
   buildCodexLaunch,
   loadCodexNativeModels,
@@ -625,6 +625,20 @@ function printEffortCapabilities(tool, toolConfig, cache) {
   }
 }
 
+// Names the variables this session took over. The manual setup in /docs/tools exports
+// them, so a person who followed the docs and then reached for the CLI sees exactly
+// which of their exports stopped mattering, and the run continues.
+function printClaudeEnvOverrides(env) {
+  const overridden = findClaudeEnvConflicts(env || process.env);
+  if (!overridden.length) return;
+  const named = overridden.length > 1
+    ? `${overridden.slice(0, -1).join(', ')} and ${overridden[overridden.length - 1]}`
+    : overridden[0];
+  console.error(`kenari: warning: ignoring ${named}`);
+  console.error('        from your environment; this session routes through kenari.');
+  console.error('        Run kenari status to see the active routing.');
+}
+
 async function runTool(tool, args) {
   const { config, toolConfig } = await ensureConfigured(tool);
   const requireKenari = hasKenariRoutes(config, tool);
@@ -650,10 +664,11 @@ async function runTool(tool, args) {
     : (process.env.KENARI_CLAUDE_NATIVE_BASE_URL || 'https://api.anthropic.com');
   const buildLaunch = tool === 'codex' ? buildCodexLaunch : buildClaudeLaunch;
   // Print only once the launch is known to be viable. Printed earlier, a run that then
-  // died on an ambiguous environment led with several lines of capability advice and
-  // ended in a fatal error, which reads as though the advice caused it.
+  // died in buildLaunch led with several lines of capability advice and ended in a
+  // fatal error, which reads as though the advice caused it.
   const runtimeBuilder = (options) => {
     const built = buildLaunch(options);
+    if (tool === 'claude') printClaudeEnvOverrides(options.env);
     printEffortCapabilities(tool, toolConfig, cache);
     return built;
   };

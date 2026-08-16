@@ -1,6 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import crypto from 'node:crypto';
+import net from 'node:net';
 import {
   base64url,
   genPkce,
@@ -99,6 +100,50 @@ test('callback server: wrong state is rejected and keeps listening; right state 
     const code = await codePromise;
     assert.equal(code, 'the-code');
   } finally {
+    server.close();
+  }
+});
+
+// A browser asks for /favicon.ico on the same keep-alive connection right after the
+// callback page renders, and the caller closes the server as soon as the code lands,
+// so that request can be served after the close. Reading the port off the server per
+// request made this an uncaught TypeError that killed the login process:
+// "Cannot read properties of null (reading 'port')" at the request handler.
+// The second request is started before the close and finished after it, which keeps
+// the socket out of the idle set on every Node version.
+test('a request finishing after server.close() is answered, not fatal', async () => {
+  const state = genState();
+  const { server, port, codePromise } = await startCallbackServer(state);
+  let uncaught;
+  const onUncaught = (error) => { uncaught = error; };
+  process.on('uncaughtException', onUncaught);
+  const socket = net.connect(port, '127.0.0.1');
+  let received = '';
+  socket.on('data', (chunk) => { received += chunk.toString(); });
+  try {
+    await new Promise((resolve, reject) => {
+      socket.once('connect', resolve);
+      socket.once('error', reject);
+    });
+    socket.write(
+      `GET /callback?code=the-code&state=${state} HTTP/1.1\r\n`
+      + `Host: 127.0.0.1:${port}\r\nConnection: keep-alive\r\n\r\n`,
+    );
+    assert.equal(await codePromise, 'the-code');
+
+    socket.write('GET /favicon.ico HTTP/1.1\r\n');
+    await new Promise((resolve) => { setTimeout(resolve, 50); });
+    server.close();
+    assert.equal(server.address(), null, 'the server must be closed for this to prove anything');
+    socket.write(`Host: 127.0.0.1:${port}\r\nConnection: close\r\n\r\n`);
+    await new Promise((resolve) => { setTimeout(resolve, 250); });
+
+    assert.equal(uncaught, undefined, `late request crashed the process: ${uncaught?.message}`);
+    assert.match(received, /HTTP\/1\.1 200/);
+    assert.match(received, /HTTP\/1\.1 404/);
+  } finally {
+    process.off('uncaughtException', onUncaught);
+    socket.destroy();
     server.close();
   }
 });

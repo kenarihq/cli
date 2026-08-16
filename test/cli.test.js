@@ -671,14 +671,47 @@ test('a launch that dies on a bad environment prints no capability advice first'
     output = []; stdout = []; stderr = [];
     // buildClaudeLaunch refuses this, so the launch never happens. Printing capability
     // advice first made a real run read as though the advice caused the error.
-    process.env.ANTHROPIC_BASE_URL = 'https://example.invalid';
-    assert.equal(await run('claude', '--version'), 1);
-    assert.match(logs(), /routing environment is ambiguous/);
+    assert.equal(await run('claude', '--fallback-model', 'sonnet'), 1);
+    assert.match(logs(), /fallback models are disabled/);
     assert.doesNotMatch(stderrLogs(), /effort high, xhigh/);
     assert.doesNotMatch(stderrLogs(), /warning: Claude Code offers/);
   } finally {
     process.env.PATH = oldPath;
+  }
+});
+
+// The manual setup in /docs/tools exports these, and the CLI used to refuse to launch
+// on them, which left anyone who had followed the docs unable to run the CLI at all.
+test('the documented manual environment is reported and taken over, not fatal', async (t) => {
+  if (process.platform === 'win32') return t.skip('POSIX executable fixture');
+  process.env.KENARI_BASE_URL = await stubCatalog([
+    { id: 'narrow', pricing: {}, reasoning_options: ['low', 'medium', 'high', 'xhigh', 'max'] },
+  ]);
+  process.env.KENARI_ALLOW_HTTP = '1';
+  const { setKey } = await import('../src/store.js');
+  setKey('kn-testkey123');
+  const bin = path.join(home, 'bin-manual-env');
+  fs.mkdirSync(bin, { recursive: true });
+  fs.writeFileSync(path.join(bin, 'claude'), '#!/bin/sh\nexit 0\n', { mode: 0o755 });
+  const oldPath = process.env.PATH;
+  process.env.PATH = `${bin}${path.delimiter}${oldPath || ''}`;
+  try {
+    assert.equal(await run(
+      'configure', 'claude',
+      '--main', 'native', '--opus', 'native', '--sonnet', 'kenari/narrow',
+      '--haiku', 'native', '--fable', 'native', '--subagents', 'native', '--yes',
+    ), 0);
+    output = []; stdout = []; stderr = [];
+    process.env.ANTHROPIC_BASE_URL = 'https://kenari.id';
+    process.env.ANTHROPIC_AUTH_TOKEN = 'kn-manual';
+    assert.equal(await run('claude', '--version'), 0);
+    assert.match(stderrLogs(), /ignoring ANTHROPIC_BASE_URL and ANTHROPIC_AUTH_TOKEN/);
+    assert.match(stderrLogs(), /this session routes through kenari/);
+    assert.doesNotMatch(logs(), /ambiguous/);
+  } finally {
+    process.env.PATH = oldPath;
     delete process.env.ANTHROPIC_BASE_URL;
+    delete process.env.ANTHROPIC_AUTH_TOKEN;
   }
 });
 
