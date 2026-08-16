@@ -77,12 +77,19 @@ export function startCallbackServer(expectedState) {
   return new Promise((resolve, reject) => {
     let onCode;
     const codePromise = new Promise((res) => { onCode = res; });
+    // Read the port once at bind time, never per request. server.address() returns
+    // null from the moment the caller closes the server, and the browser asks for
+    // /favicon.ico on the same keep-alive connection right after the callback page.
+    // That request can reach this handler after the close, which used to kill the
+    // process with "Cannot read properties of null (reading 'port')".
+    let port = 0;
     const server = http.createServer((req, res) => {
-      handleCallbackRequest(req, res, { expectedState, port: server.address().port, onCode });
+      handleCallbackRequest(req, res, { expectedState, port, onCode });
     });
     server.once('error', reject);
     server.listen(0, '127.0.0.1', () => {
-      resolve({ server, port: server.address().port, codePromise });
+      port = server.address().port;
+      resolve({ server, port, codePromise });
     });
   });
 }
