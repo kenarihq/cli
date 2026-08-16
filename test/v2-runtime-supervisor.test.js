@@ -12,7 +12,7 @@ import {
   codexKenariModels,
   resolveCodexNativeBase,
 } from '../src/runtime/codex.js';
-import { spawnSync } from 'node:child_process';
+import { spawn, spawnSync } from 'node:child_process';
 import {
   binaryCandidates,
   resolveBinary,
@@ -433,6 +433,23 @@ test('a real .cmd shim runs, keeps its arguments and returns its exit code', (t)
   assert.equal(result.error, undefined);
   assert.equal(result.status, 7);
   assert.match(result.stdout, /GOT "a & b"/);
+});
+
+// runWrappedTool forwards SIGWINCH so a resize reaches the TUI. Node emits SIGWINCH on
+// Windows as well, but child.kill there does not deliver a signal, it terminates. If
+// that applies to SIGWINCH, resizing the console would kill the session, so this asserts
+// the child is still alive afterwards on whatever platform is running.
+test('forwarding a resize does not kill the child', async (t) => {
+  const child = spawn(process.execPath, ['-e', 'setTimeout(() => process.exit(3), 10000)'], {
+    stdio: 'ignore',
+  });
+  t.after(() => { try { child.kill('SIGKILL'); } catch {} });
+  await new Promise((resolve) => { setTimeout(resolve, 300); });
+  assert.equal(child.exitCode, null, 'child should be running before the resize');
+  try { child.kill('SIGWINCH'); } catch {}
+  await new Promise((resolve) => { setTimeout(resolve, 500); });
+  assert.equal(child.exitCode, null, 'a forwarded resize must not terminate the child');
+  assert.equal(child.signalCode, null, 'a forwarded resize must not signal-kill the child');
 });
 
 test('resolveBinary skips excluded wrapper and supervisor returns child exit code', async (t) => {
