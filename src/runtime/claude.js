@@ -10,10 +10,17 @@ export const CLAUDE_ROLE_ENV = Object.freeze({
   subagents: 'CLAUDE_CODE_SUBAGENT_MODEL',
 });
 
-const CONFLICT_ENV = ['ANTHROPIC_BASE_URL', 'ANTHROPIC_AUTH_TOKEN', 'ANTHROPIC_API_KEY'];
+const OVERRIDDEN_ENV = ['ANTHROPIC_BASE_URL', 'ANTHROPIC_AUTH_TOKEN', 'ANTHROPIC_API_KEY'];
 
+// The manual Claude Code setup in /docs/tools has people export these three, and the
+// launch below replaces every one of them: the base url points at the local router,
+// and both credentials are dropped so Claude Code authenticates through it instead.
+// A value already in the environment therefore changes nothing about the run. It is
+// reported so the person knows which of their exports this session ignored, and it is
+// never fatal: refusing to launch made the documented manual path and the CLI path
+// mutually exclusive, with no flag, no migration and no remedy in the error.
 export function findClaudeEnvConflicts(env = process.env) {
-  return CONFLICT_ENV.filter((name) => typeof env[name] === 'string' && env[name] !== '');
+  return OVERRIDDEN_ENV.filter((name) => typeof env[name] === 'string' && env[name] !== '');
 }
 
 export function buildClaudeLaunch(options) {
@@ -23,10 +30,6 @@ export function buildClaudeLaunch(options) {
     .some((role) => role.mode === 'fixed');
   if (usesKenari && args.some((arg) => arg === '--fallback-model' || arg.startsWith('--fallback-model='))) {
     throw new KenariError('Claude fallback models are disabled for mixed Kenari routing');
-  }
-  const conflicts = findClaudeEnvConflicts(inputEnv);
-  if (conflicts.length && !options.allowAmbiguousEnv) {
-    throw new KenariError(`Claude routing environment is ambiguous: ${conflicts.join(', ')}`);
   }
   const env = { ...inputEnv, ANTHROPIC_BASE_URL: options.routerUrl };
   if (options.routerCapabilityToken) {

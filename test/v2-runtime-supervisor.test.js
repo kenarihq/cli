@@ -85,15 +85,11 @@ test('Claude launch layers only fixed roles and removes credential environment',
     ANTHROPIC_API_KEY: 'secret',
   };
   assert.deepEqual(findClaudeEnvConflicts(original), ['ANTHROPIC_API_KEY']);
-  assert.throws(() => buildClaudeLaunch({
-    toolConfig: { roles: claudeRoles }, routerUrl: 'http://127.0.0.1:1', env: original,
-  }), /ambiguous/);
   const built = buildClaudeLaunch({
     toolConfig: { roles: claudeRoles },
     routerUrl: 'http://127.0.0.1:1',
     routerCapabilityToken: 'capability',
     env: original,
-    allowAmbiguousEnv: true,
     args: ['-p', 'hello'],
   });
   assert.deepEqual(built.args, ['-p', 'hello']);
@@ -109,6 +105,39 @@ test('Claude launch layers only fixed roles and removes credential environment',
     env: {},
     args: ['--fallback-model', 'sonnet'],
   }), /fallback models are disabled/);
+});
+
+// The manual setup in /docs/tools exports all three of these. Refusing to launch on
+// them left a person who had followed the docs with no way to run the CLI at all, so
+// the launch has to survive them and simply take them over.
+test('Claude launch survives the documented manual environment and takes it over', () => {
+  const docsEnv = {
+    PATH: '/bin',
+    ANTHROPIC_BASE_URL: 'https://kenari.id',
+    ANTHROPIC_AUTH_TOKEN: 'kn-manual',
+    ANTHROPIC_API_KEY: 'sk-manual',
+    ANTHROPIC_MODEL: 'deepseek-v4-flash:free',
+  };
+  assert.deepEqual(findClaudeEnvConflicts(docsEnv), [
+    'ANTHROPIC_BASE_URL',
+    'ANTHROPIC_AUTH_TOKEN',
+    'ANTHROPIC_API_KEY',
+  ]);
+  const built = buildClaudeLaunch({
+    toolConfig: { roles: claudeRoles },
+    routerUrl: 'http://127.0.0.1:7',
+    env: docsEnv,
+  });
+  assert.equal(built.env.ANTHROPIC_BASE_URL, 'http://127.0.0.1:7');
+  assert.equal(built.env.ANTHROPIC_AUTH_TOKEN, undefined);
+  assert.equal(built.env.ANTHROPIC_API_KEY, undefined);
+  assert.equal(built.env.ANTHROPIC_DEFAULT_OPUS_MODEL, 'kenari/gpt-5');
+  assert.equal(built.env.PATH, '/bin');
+});
+
+// An empty value is not a takeover worth reporting.
+test('Claude launch reports no override for an empty variable', () => {
+  assert.deepEqual(findClaudeEnvConflicts({ ANTHROPIC_BASE_URL: '', PATH: '/bin' }), []);
 });
 
 test('Codex launch injects temporary controls before original args', () => {
