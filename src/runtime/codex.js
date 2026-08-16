@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 import { spawnSync } from 'node:child_process';
 import { KenariError } from '../store.js';
+import { spawnTarget } from '../supervisor.js';
 
 export const CODEX_CHATGPT_BASE_URL = 'https://chatgpt.com/backend-api/codex';
 export const CODEX_API_BASE_URL = 'https://api.openai.com/v1';
@@ -12,7 +13,11 @@ function tomlString(value) {
 
 export function resolveCodexNativeBase(binary, env = process.env, run = spawnSync) {
   if (env.KENARI_CODEX_NATIVE_BASE_URL) return env.KENARI_CODEX_NATIVE_BASE_URL;
-  const result = run(binary, ['login', 'status'], {
+  // Through the same interpreter hop as the launch itself. An npm install on Windows
+  // resolves to codex.cmd, which cannot be executed directly, so probing it without
+  // this returned a failure and `kenari codex` gave up before it started.
+  const probe = spawnTarget(binary, ['login', 'status'], env);
+  const result = run(probe.file, probe.args, {
     encoding: 'utf8',
     env,
     timeout: 5000,
@@ -27,7 +32,8 @@ export function resolveCodexNativeBase(binary, env = process.env, run = spawnSyn
 
 export function loadCodexNativeModels(binary, env = process.env) {
   for (const args of [['debug', 'models'], ['debug', 'models', '--bundled']]) {
-    const result = spawnSync(binary, args, {
+    const probe = spawnTarget(binary, args, env);
+    const result = spawnSync(probe.file, probe.args, {
       encoding: 'utf8',
       env,
       timeout: 5000,

@@ -12,7 +12,14 @@ import {
   codexKenariModels,
   resolveCodexNativeBase,
 } from '../src/runtime/codex.js';
-import { resolveBinary, runWrappedTool } from '../src/supervisor.js';
+import { spawn, spawnSync } from 'node:child_process';
+import {
+  binaryCandidates,
+  forwardedSignals,
+  resolveBinary,
+  runWrappedTool,
+  spawnTarget,
+} from '../src/supervisor.js';
 
 const originalAllowHttp = process.env.KENARI_ALLOW_HTTP;
 test.before(() => { process.env.KENARI_ALLOW_HTTP = '1'; });
@@ -338,6 +345,132 @@ test('Codex native upstream fails closed when login method is unknown', () => {
     {},
     () => ({ status: 1, stdout: '', stderr: 'Not logged in' }),
   ), /cannot determine Codex login method/);
+});
+
+// npm installs `tool`, `tool.cmd` and `tool.ps1` side by side. Windows can only run
+// the ones with an extension it knows, so picking the bare name is what produced
+// "spawn C:\\Users\\...\\npm\\claude ENOENT" for a file that exists. Platform is
+// injected so the Windows behaviour is covered from any machine, and the Windows
+// runner in CI additionally executes the real thing further down.
+test('binaryCandidates asks for the Windows extensions and leaves POSIX alone', () => {
+  assert.deepEqual(binaryCandidates('claude', {}, 'linux'), ['claude']);
+  assert.deepEqual(binaryCandidates('claude', {}, 'darwin'), ['claude']);
+  // PATHEXT order is preserved, and each extension is offered in both cases because
+  // PATHEXT is uppercase while npm writes the shim in lowercase.
+  assert.deepEqual(
+    binaryCandidates('claude', { PATHEXT: '.EXE;.CMD' }, 'win32'),
+    ['claude.EXE', 'claude.exe', 'claude.CMD', 'claude.cmd', 'claude'],
+  );
+  const order = binaryCandidates('claude', {}, 'win32');
+  // An executable beats a script, and the bare name is the last resort rather than
+  // the first pick: an extensionless real executable still runs on Windows, a
+  // shebang script does not.
+  assert.ok(order.indexOf('claude.exe') < order.indexOf('claude.cmd'));
+  assert.equal(order.at(-1), 'claude');
+  assert.equal(new Set(order).size, order.length, 'no duplicate candidates');
+  // A lowercase PATHEXT entry must not produce the same name twice.
+  assert.deepEqual(binaryCandidates('claude', { PATHEXT: '.cmd' }, 'win32'), ['claude.cmd', 'claude']);
+  // A name that already carries an extension is taken as given.
+  assert.deepEqual(binaryCandidates('claude.cmd', {}, 'win32'), ['claude.cmd']);
+});
+
+test('resolveBinary prefers the runnable Windows shim over the bare one', (t) => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'kenari-winpath-'));
+  t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
+  fs.writeFileSync(path.join(dir, 'tool'), '#!/usr/bin/env node\n', { mode: 0o755 });
+  fs.writeFileSync(path.join(dir, 'tool.cmd'), '@echo off\r\n', { mode: 0o755 });
+  const env = { PATH: dir, PATHEXT: '.COM;.EXE;.BAT;.CMD' };
+  // Lowercased on the way out: Windows filesystems are case insensitive, so the name
+  // comes back in whatever case PATHEXT asked for, and spawnTarget matches either.
+  assert.equal(
+    path.basename(resolveBinary('tool', { env, platform: 'win32' })).toLowerCase(),
+    'tool.cmd',
+  );
+  // Same directory, POSIX: the bare shim is the runnable one.
+  assert.equal(path.basename(resolveBinary('tool', { env, platform: 'linux' })), 'tool');
+});
+
+// A bare name is still resolvable on Windows when nothing better exists, because an
+// extensionless file can be a real executable image. Only the preference changed.
+test('resolveBinary on Windows still accepts a bare name when it is the only candidate', (t) => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'kenari-winbare-'));
+  t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
+  const bare = path.join(dir, 'tool');
+  fs.writeFileSync(bare, 'binary\n', { mode: 0o755 });
+  assert.equal(resolveBinary('tool', { env: { PATH: dir }, platform: 'win32' }), fs.realpathSync(bare));
+});
+
+test('spawnTarget routes a script through the interpreter and everything else directly', () => {
+  const env = { ComSpec: 'C:\\Windows\\System32\\cmd.exe' };
+  for (const script of ['C:\\npm\\claude.cmd', 'C:\\npm\\claude.CMD', 'C:\\npm\\claude.bat']) {
+    const target = spawnTarget(script, ['-p', 'hello'], env, 'win32');
+    assert.equal(target.file, 'C:\\Windows\\System32\\cmd.exe');
+    assert.deepEqual(target.args, ['/d', '/c', script, '-p', 'hello']);
+  }
+  // A real executable needs no interpreter, and neither does anything on POSIX.
+  assert.deepEqual(
+    spawnTarget('C:\\Program Files\\claude.exe', ['-p'], env, 'win32'),
+    { file: 'C:\\Program Files\\claude.exe', args: ['-p'] },
+  );
+  assert.deepEqual(
+    spawnTarget('/usr/local/bin/claude', ['-p'], {}, 'darwin'),
+    { file: '/usr/local/bin/claude', args: ['-p'] },
+  );
+  // Falls back to cmd.exe when ComSpec is absent.
+  assert.equal(spawnTarget('a.cmd', [], {}, 'win32').file, 'cmd.exe');
+});
+
+// The cells above prove the decision. This one proves the decision is the right one,
+// and it can only run where it matters. Without it the suite stayed green on the
+// Windows runner while the CLI could not launch a single session there.
+test('a real .cmd shim runs, keeps its arguments and returns its exit code', (t) => {
+  if (process.platform !== 'win32') return t.skip('Windows-only');
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'kenari-realcmd-'));
+  t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
+  const script = path.join(dir, 'probe.cmd');
+  fs.writeFileSync(script, '@echo off\r\necho GOT %1\r\nexit /b 7\r\n');
+  const target = spawnTarget(script, ['a & b']);
+  const result = spawnSync(target.file, target.args, { encoding: 'utf8' });
+  assert.equal(result.error, undefined);
+  assert.equal(result.status, 7);
+  assert.match(result.stdout, /GOT "a & b"/);
+});
+
+// A resize has to reach the TUI on POSIX so it can redraw, and must not be forwarded on
+// Windows, where kill terminates rather than signals. The other three mean termination
+// on both, so they are forwarded everywhere.
+test('a resize is forwarded on POSIX and withheld on Windows', () => {
+  assert.deepEqual(forwardedSignals('darwin'), ['SIGINT', 'SIGTERM', 'SIGHUP', 'SIGWINCH']);
+  assert.deepEqual(forwardedSignals('linux'), ['SIGINT', 'SIGTERM', 'SIGHUP', 'SIGWINCH']);
+  assert.deepEqual(forwardedSignals('win32'), ['SIGINT', 'SIGTERM', 'SIGHUP']);
+});
+
+// The justification for the split above, kept as a live check rather than a comment.
+// A child that listens for a resize is sent one, and the question is whether it ever
+// arrives. On POSIX it must, which is the whole point of forwarding. On Windows it
+// never does, because kill there does not deliver signals, and what it does instead
+// depends on the Node version: the runner showed Node 20 terminating the child with
+// signalCode SIGKILL and Node 18 doing nothing at all. Useless on one, fatal on the
+// other, so it is withheld. If a resize ever arrives on Windows, this fails and the
+// exclusion can be revisited.
+test('a resize reaches a POSIX child and never reaches a Windows one', async (t) => {
+  const script = "process.on('SIGWINCH', () => { console.log('RESIZED'); });"
+    + 'setTimeout(() => process.exit(3), 10000);';
+  const child = spawn(process.execPath, ['-e', script], { stdio: ['ignore', 'pipe', 'ignore'] });
+  t.after(() => { try { child.kill('SIGKILL'); } catch {} });
+  let seen = '';
+  child.stdout.on('data', (chunk) => { seen += chunk.toString(); });
+  await new Promise((resolve) => { setTimeout(resolve, 400); });
+  try { child.kill('SIGWINCH'); } catch {}
+  await new Promise((resolve) => { setTimeout(resolve, 600); });
+
+  if (process.platform === 'win32') {
+    assert.doesNotMatch(seen, /RESIZED/, 'Windows delivered a resize, so it could be forwarded');
+    return;
+  }
+  assert.match(seen, /RESIZED/, 'the child must actually receive the resize');
+  assert.equal(child.exitCode, null, 'a resize must not terminate the child');
+  assert.equal(child.signalCode, null, 'a resize must not signal-kill the child');
 });
 
 test('resolveBinary skips excluded wrapper and supervisor returns child exit code', async (t) => {

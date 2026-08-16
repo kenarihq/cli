@@ -97,6 +97,22 @@ function stubCatalog(models) {
   });
 }
 
+// A stand-in for the real claude or codex binary that the host platform can actually
+// execute. On Windows that has to be a .cmd, because CreateProcess cannot run a
+// shebang script, which is the same reason `kenari claude` used to die there with
+// ENOENT. Writing only the POSIX form is why every launch test skipped on Windows and
+// why a total failure to launch shipped past a green matrix.
+function writeFakeTool(dir, name, { exitCode = 0, prints = [] } = {}) {
+  fs.mkdirSync(dir, { recursive: true });
+  if (process.platform === 'win32') {
+    const body = ['@echo off', ...prints.map((line) => `echo ${line}`), `exit /b ${exitCode}`];
+    fs.writeFileSync(path.join(dir, `${name}.cmd`), `${body.join('\r\n')}\r\n`);
+    return;
+  }
+  const body = ['#!/bin/sh', ...prints.map((line) => `echo '${line}'`), `exit ${exitCode}`];
+  fs.writeFileSync(path.join(dir, name), `${body.join('\n')}\n`, { mode: 0o755 });
+}
+
 const CATALOG = [{
   id: 'glm-5-2',
   pricing: {
@@ -230,7 +246,6 @@ test('status JSON is offline and never prints credential', async () => {
 });
 
 test('the narrowing warning is per model, not per slot, and names the right tool', async (t) => {
-  if (process.platform === 'win32') return t.skip('POSIX executable fixture');
   process.env.KENARI_BASE_URL = await stubCatalog([
     { id: 'narrow', pricing: {}, reasoning_options: ['high', 'xhigh'] },
   ]);
@@ -238,8 +253,7 @@ test('the narrowing warning is per model, not per slot, and names the right tool
   const { setKey } = await import('../src/store.js');
   setKey('kn-testkey123');
   const bin = path.join(home, 'bin-many');
-  fs.mkdirSync(bin, { recursive: true });
-  fs.writeFileSync(path.join(bin, 'claude'), '#!/bin/sh\nexit 0\n', { mode: 0o755 });
+  writeFakeTool(bin, 'claude');
   const oldPath = process.env.PATH;
   process.env.PATH = `${bin}${path.delimiter}${oldPath || ''}`;
   try {
@@ -262,7 +276,6 @@ test('the narrowing warning is per model, not per slot, and names the right tool
 });
 
 test('the narrowing warning names Codex when Codex is what is launching', async (t) => {
-  if (process.platform === 'win32') return t.skip('POSIX executable fixture');
   process.env.KENARI_BASE_URL = await stubCatalog([
     { id: 'narrow', pricing: {}, reasoning_options: ['high', 'xhigh'] },
   ]);
@@ -273,12 +286,30 @@ test('the narrowing warning names Codex when Codex is what is launching', async 
   fs.mkdirSync(bin, { recursive: true });
   // The banner prints just before spawn, so the fixture has to survive the whole codex
   // launch path: login status for the native base, then debug models for the catalog.
-  fs.writeFileSync(path.join(bin, 'codex'), [
-    '#!/bin/sh',
-    'if [ "$1" = "login" ]; then echo "Logged in using an API key"; exit 0; fi',
-    'if [ "$1" = "debug" ]; then echo \'{"models":[{"slug":"gpt-5","supported_reasoning_levels":[]}]}\'; exit 0; fi',
-    'exit 0',
-  ].join('\n'), { mode: 0o755 });
+  // Written for whichever interpreter the platform can run, same reason as
+  // writeFakeTool, which this is too specific to use.
+  const models = '{"models":[{"slug":"gpt-5","supported_reasoning_levels":[]}]}';
+  if (process.platform === 'win32') {
+    fs.writeFileSync(path.join(bin, 'codex.cmd'), [
+      '@echo off',
+      'if "%~1"=="login" (',
+      '  echo Logged in using an API key',
+      '  exit /b 0',
+      ')',
+      'if "%~1"=="debug" (',
+      `  echo ${models}`,
+      '  exit /b 0',
+      ')',
+      'exit /b 0',
+    ].join('\r\n') + '\r\n');
+  } else {
+    fs.writeFileSync(path.join(bin, 'codex'), [
+      '#!/bin/sh',
+      'if [ "$1" = "login" ]; then echo "Logged in using an API key"; exit 0; fi',
+      `if [ "$1" = "debug" ]; then echo '${models}'; exit 0; fi`,
+      'exit 0',
+    ].join('\n'), { mode: 0o755 });
+  }
   const oldPath = process.env.PATH;
   process.env.PATH = `${bin}${path.delimiter}${oldPath || ''}`;
   try {
@@ -512,7 +543,6 @@ test('wrapper requires configuration outside a TTY', async () => {
 });
 
 test('fixed slots print advertised effort capabilities and narrowing warning on stderr', async (t) => {
-  if (process.platform === 'win32') return t.skip('POSIX executable fixture');
   const cases = [
     { id: 'unknown', reasoning_options: undefined, line: 'effort unknown (gateway reports no capability)', warning: false },
     { id: 'unsupported', reasoning_options: [], line: 'effort unsupported', warning: false },
@@ -529,8 +559,7 @@ test('fixed slots print advertised effort capabilities and narrowing warning on 
     const { setKey } = await import('../src/store.js');
     setKey('kn-testkey123');
     const bin = path.join(home, `bin-${item.id}`);
-    fs.mkdirSync(bin, { recursive: true });
-    fs.writeFileSync(path.join(bin, 'claude'), '#!/bin/sh\nexit 0\n', { mode: 0o755 });
+    writeFakeTool(bin, 'claude');
     const oldPath = process.env.PATH;
     process.env.PATH = `${bin}${path.delimiter}${oldPath || ''}`;
     try {
@@ -559,10 +588,8 @@ test('fixed slots print advertised effort capabilities and narrowing warning on 
 });
 
 test('native-only wrapper prints no capability output', async (t) => {
-  if (process.platform === 'win32') return t.skip('POSIX executable fixture');
   const bin = path.join(home, 'native-only-bin');
-  fs.mkdirSync(bin, { recursive: true });
-  fs.writeFileSync(path.join(bin, 'claude'), '#!/bin/sh\nexit 0\n', { mode: 0o755 });
+  writeFakeTool(bin, 'claude');
   const oldPath = process.env.PATH;
   process.env.PATH = `${bin}${path.delimiter}${oldPath || ''}`;
   try {
@@ -583,11 +610,8 @@ test('native-only wrapper prints no capability output', async (t) => {
 });
 
 test('native wrapper preserves original child exit code', async (t) => {
-  if (process.platform === 'win32') return t.skip('POSIX executable fixture');
   const bin = path.join(home, 'bin');
-  fs.mkdirSync(bin, { recursive: true });
-  const fake = path.join(bin, 'claude');
-  fs.writeFileSync(fake, '#!/bin/sh\nexit 7\n', { mode: 0o755 });
+  writeFakeTool(bin, 'claude', { exitCode: 7 });
   const oldPath = process.env.PATH;
   process.env.PATH = `${bin}${path.delimiter}${oldPath || ''}`;
   try {
@@ -609,7 +633,6 @@ test('native wrapper preserves original child exit code', async (t) => {
 });
 
 test('two slots on different models each report their own capability, aligned', async (t) => {
-  if (process.platform === 'win32') return t.skip('POSIX executable fixture');
   process.env.KENARI_BASE_URL = await stubCatalog([
     { id: 'aa', pricing: {}, reasoning_options: ['high', 'xhigh'] },
     { id: 'bbbbbbbbbbbb', pricing: {}, reasoning_options: ['low', 'medium', 'high', 'xhigh', 'max'] },
@@ -618,8 +641,7 @@ test('two slots on different models each report their own capability, aligned', 
   const { setKey } = await import('../src/store.js');
   setKey('kn-testkey123');
   const bin = path.join(home, 'bin-two');
-  fs.mkdirSync(bin, { recursive: true });
-  fs.writeFileSync(path.join(bin, 'claude'), '#!/bin/sh\nexit 0\n', { mode: 0o755 });
+  writeFakeTool(bin, 'claude');
   const oldPath = process.env.PATH;
   process.env.PATH = `${bin}${path.delimiter}${oldPath || ''}`;
   try {
@@ -650,7 +672,6 @@ test('two slots on different models each report their own capability, aligned', 
 });
 
 test('a launch that dies on a bad environment prints no capability advice first', async (t) => {
-  if (process.platform === 'win32') return t.skip('POSIX executable fixture');
   process.env.KENARI_BASE_URL = await stubCatalog([
     { id: 'narrow', pricing: {}, reasoning_options: ['high', 'xhigh'] },
   ]);
@@ -658,8 +679,7 @@ test('a launch that dies on a bad environment prints no capability advice first'
   const { setKey } = await import('../src/store.js');
   setKey('kn-testkey123');
   const bin = path.join(home, 'bin-ambig');
-  fs.mkdirSync(bin, { recursive: true });
-  fs.writeFileSync(path.join(bin, 'claude'), '#!/bin/sh\nexit 0\n', { mode: 0o755 });
+  writeFakeTool(bin, 'claude');
   const oldPath = process.env.PATH;
   process.env.PATH = `${bin}${path.delimiter}${oldPath || ''}`;
   try {
@@ -683,7 +703,6 @@ test('a launch that dies on a bad environment prints no capability advice first'
 // The manual setup in /docs/tools exports these, and the CLI used to refuse to launch
 // on them, which left anyone who had followed the docs unable to run the CLI at all.
 test('the documented manual environment is reported and taken over, not fatal', async (t) => {
-  if (process.platform === 'win32') return t.skip('POSIX executable fixture');
   process.env.KENARI_BASE_URL = await stubCatalog([
     { id: 'narrow', pricing: {}, reasoning_options: ['low', 'medium', 'high', 'xhigh', 'max'] },
   ]);
@@ -691,8 +710,7 @@ test('the documented manual environment is reported and taken over, not fatal', 
   const { setKey } = await import('../src/store.js');
   setKey('kn-testkey123');
   const bin = path.join(home, 'bin-manual-env');
-  fs.mkdirSync(bin, { recursive: true });
-  fs.writeFileSync(path.join(bin, 'claude'), '#!/bin/sh\nexit 0\n', { mode: 0o755 });
+  writeFakeTool(bin, 'claude');
   const oldPath = process.env.PATH;
   process.env.PATH = `${bin}${path.delimiter}${oldPath || ''}`;
   try {
@@ -740,7 +758,6 @@ test('configure pins effort per slot and refuses it on a native slot', async () 
 });
 
 test('the launch banner shows a pinned slot and warns only when the model cannot honor it', async (t) => {
-  if (process.platform === 'win32') return t.skip('POSIX executable fixture');
   process.env.KENARI_BASE_URL = await stubCatalog([
     { id: 'narrow', pricing: {}, reasoning_options: ['high', 'xhigh'] },
   ]);
@@ -748,8 +765,7 @@ test('the launch banner shows a pinned slot and warns only when the model cannot
   const { setKey } = await import('../src/store.js');
   setKey('kn-testkey123');
   const bin = path.join(home, 'bin-pin');
-  fs.mkdirSync(bin, { recursive: true });
-  fs.writeFileSync(path.join(bin, 'claude'), '#!/bin/sh\nexit 0\n', { mode: 0o755 });
+  writeFakeTool(bin, 'claude');
   const oldPath = process.env.PATH;
   process.env.PATH = `${bin}${path.delimiter}${oldPath || ''}`;
   try {
