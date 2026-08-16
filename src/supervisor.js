@@ -73,6 +73,17 @@ export function resolveBinary(name, options = {}) {
   throw new KenariError(`original ${name} not found (searched ${searched.join(', ') || 'empty PATH'})`);
 }
 
+// Windows has no signal delivery. child.kill there terminates the target whatever name
+// it is given, so forwarding SIGWINCH killed the wrapped session outright: the CI runner
+// reported the child dead with signalCode SIGKILL after a resize. The other three are
+// forwarded because termination is what they mean anyway. On POSIX all four are real
+// signals and a resize has to reach the TUI for it to redraw.
+export function forwardedSignals(platform = process.platform) {
+  const signals = ['SIGINT', 'SIGTERM', 'SIGHUP'];
+  if (platform !== 'win32') signals.push('SIGWINCH');
+  return signals;
+}
+
 function exitCode(code, signal) {
   if (Number.isInteger(code)) return code;
   const number = signal && os.constants.signals[signal];
@@ -97,7 +108,7 @@ export async function runWrappedTool(options) {
       stdio: 'inherit',
       windowsHide: false,
     });
-    for (const signal of ['SIGINT', 'SIGTERM', 'SIGHUP', 'SIGWINCH']) {
+    for (const signal of forwardedSignals()) {
       const handler = () => {
         if (child.exitCode === null && !child.killed) {
           try { child.kill(signal); } catch {}
