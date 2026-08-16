@@ -445,36 +445,30 @@ test('a resize is forwarded on POSIX and withheld on Windows', () => {
   assert.deepEqual(forwardedSignals('win32'), ['SIGINT', 'SIGTERM', 'SIGHUP']);
 });
 
-// The reason SIGWINCH is withheld, kept as a live check rather than a comment. The
-// Windows runner found this: a forwarded resize came back with signalCode SIGKILL, so
-// resizing the console would have killed the wrapped session. If Node ever gains real
-// signal delivery on Windows, this fails and the exclusion above can be revisited.
-test('kill really does terminate on Windows whatever signal it is handed', async (t) => {
-  if (process.platform !== 'win32') return t.skip('POSIX delivers signals for real');
-  const child = spawn(process.execPath, ['-e', 'setTimeout(() => process.exit(3), 10000)'], {
-    stdio: 'ignore',
-  });
+// The justification for the split above, kept as a live check rather than a comment.
+// A child that listens for a resize is sent one, and the question is whether it ever
+// arrives. On POSIX it must, which is the whole point of forwarding. On Windows it
+// never does, because kill there does not deliver signals, and what it does instead
+// depends on the Node version: the runner showed Node 20 terminating the child with
+// signalCode SIGKILL and Node 18 doing nothing at all. Useless on one, fatal on the
+// other, so it is withheld. If a resize ever arrives on Windows, this fails and the
+// exclusion can be revisited.
+test('a resize reaches a POSIX child and never reaches a Windows one', async (t) => {
+  const script = "process.on('SIGWINCH', () => { console.log('RESIZED'); });"
+    + 'setTimeout(() => process.exit(3), 10000);';
+  const child = spawn(process.execPath, ['-e', script], { stdio: ['ignore', 'pipe', 'ignore'] });
   t.after(() => { try { child.kill('SIGKILL'); } catch {} });
-  await new Promise((resolve) => { setTimeout(resolve, 300); });
-  assert.equal(child.exitCode, null, 'child should be running first');
+  let seen = '';
+  child.stdout.on('data', (chunk) => { seen += chunk.toString(); });
+  await new Promise((resolve) => { setTimeout(resolve, 400); });
   try { child.kill('SIGWINCH'); } catch {}
-  await new Promise((resolve) => { setTimeout(resolve, 500); });
-  assert.ok(
-    child.exitCode !== null || child.signalCode !== null,
-    'if this passes, Windows now delivers SIGWINCH and forwardedSignals can include it',
-  );
-});
+  await new Promise((resolve) => { setTimeout(resolve, 600); });
 
-// On POSIX the same call must be harmless, which is what makes forwarding it correct.
-test('a resize leaves the child alone on POSIX', async (t) => {
-  if (process.platform === 'win32') return t.skip('covered by the Windows cell above');
-  const child = spawn(process.execPath, ['-e', 'setTimeout(() => process.exit(3), 10000)'], {
-    stdio: 'ignore',
-  });
-  t.after(() => { try { child.kill('SIGKILL'); } catch {} });
-  await new Promise((resolve) => { setTimeout(resolve, 300); });
-  child.kill('SIGWINCH');
-  await new Promise((resolve) => { setTimeout(resolve, 500); });
+  if (process.platform === 'win32') {
+    assert.doesNotMatch(seen, /RESIZED/, 'Windows delivered a resize, so it could be forwarded');
+    return;
+  }
+  assert.match(seen, /RESIZED/, 'the child must actually receive the resize');
   assert.equal(child.exitCode, null, 'a resize must not terminate the child');
   assert.equal(child.signalCode, null, 'a resize must not signal-kill the child');
 });
