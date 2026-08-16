@@ -12,9 +12,10 @@ const DEFAULT_PATHEXT = '.COM;.EXE;.BAT;.CMD';
 // three shims side by side, `claude` for a Unix-like shell, `claude.cmd` for cmd and
 // PowerShell, and `claude.ps1`. Joining the directory and the bare name found the
 // first one, so CreateProcess answered ENOENT for a file that plainly exists, and
-// `kenari claude` could not start on Windows at all. There is no bare-name fallback
-// here on purpose: an extensionless file is not runnable on Windows, so returning it
-// would only produce that same ENOENT one layer later instead of a clear message.
+// `kenari claude` could not start on Windows at all. The bare name stays as the last
+// candidate rather than being dropped, because an extensionless file that is a real
+// executable image does run on Windows. Preferring the extensions fixes the shim case
+// without taking that away.
 // PATHEXT is conventionally uppercase while npm writes `claude.cmd` in lowercase, so
 // each extension is tried in both cases. A normal Windows filesystem is case
 // insensitive and would match either, but a directory can be marked case sensitive
@@ -30,6 +31,7 @@ export function binaryCandidates(name, env = process.env, platform = process.pla
       if (!names.includes(candidate)) names.push(candidate);
     }
   }
+  names.push(name);
   return names;
 }
 

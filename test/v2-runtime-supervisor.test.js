@@ -358,14 +358,17 @@ test('binaryCandidates asks for the Windows extensions and leaves POSIX alone', 
   // PATHEXT is uppercase while npm writes the shim in lowercase.
   assert.deepEqual(
     binaryCandidates('claude', { PATHEXT: '.EXE;.CMD' }, 'win32'),
-    ['claude.EXE', 'claude.exe', 'claude.CMD', 'claude.cmd'],
+    ['claude.EXE', 'claude.exe', 'claude.CMD', 'claude.cmd', 'claude'],
   );
-  // An executable is still preferred over a script: every .exe candidate comes first.
   const order = binaryCandidates('claude', {}, 'win32');
+  // An executable beats a script, and the bare name is the last resort rather than
+  // the first pick: an extensionless real executable still runs on Windows, a
+  // shebang script does not.
   assert.ok(order.indexOf('claude.exe') < order.indexOf('claude.cmd'));
+  assert.equal(order.at(-1), 'claude');
   assert.equal(new Set(order).size, order.length, 'no duplicate candidates');
   // A lowercase PATHEXT entry must not produce the same name twice.
-  assert.deepEqual(binaryCandidates('claude', { PATHEXT: '.cmd' }, 'win32'), ['claude.cmd']);
+  assert.deepEqual(binaryCandidates('claude', { PATHEXT: '.cmd' }, 'win32'), ['claude.cmd', 'claude']);
   // A name that already carries an extension is taken as given.
   assert.deepEqual(binaryCandidates('claude.cmd', {}, 'win32'), ['claude.cmd']);
 });
@@ -386,14 +389,14 @@ test('resolveBinary prefers the runnable Windows shim over the bare one', (t) =>
   assert.equal(path.basename(resolveBinary('tool', { env, platform: 'linux' })), 'tool');
 });
 
-test('resolveBinary on Windows reports not found rather than handing back an unrunnable file', (t) => {
+// A bare name is still resolvable on Windows when nothing better exists, because an
+// extensionless file can be a real executable image. Only the preference changed.
+test('resolveBinary on Windows still accepts a bare name when it is the only candidate', (t) => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'kenari-winbare-'));
   t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
-  fs.writeFileSync(path.join(dir, 'tool'), '#!/usr/bin/env node\n', { mode: 0o755 });
-  assert.throws(
-    () => resolveBinary('tool', { env: { PATH: dir }, platform: 'win32' }),
-    /not found/,
-  );
+  const bare = path.join(dir, 'tool');
+  fs.writeFileSync(bare, 'binary\n', { mode: 0o755 });
+  assert.equal(resolveBinary('tool', { env: { PATH: dir }, platform: 'win32' }), fs.realpathSync(bare));
 });
 
 test('spawnTarget routes a script through the interpreter and everything else directly', () => {
