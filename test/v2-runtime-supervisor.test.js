@@ -12,7 +12,13 @@ import {
   codexKenariModels,
   resolveCodexNativeBase,
 } from '../src/runtime/codex.js';
-import { resolveBinary, runWrappedTool } from '../src/supervisor.js';
+import { spawnSync } from 'node:child_process';
+import {
+  binaryCandidates,
+  resolveBinary,
+  runWrappedTool,
+  spawnTarget,
+} from '../src/supervisor.js';
 
 const originalAllowHttp = process.env.KENARI_ALLOW_HTTP;
 test.before(() => { process.env.KENARI_ALLOW_HTTP = '1'; });
@@ -338,6 +344,88 @@ test('Codex native upstream fails closed when login method is unknown', () => {
     {},
     () => ({ status: 1, stdout: '', stderr: 'Not logged in' }),
   ), /cannot determine Codex login method/);
+});
+
+// npm installs `tool`, `tool.cmd` and `tool.ps1` side by side. Windows can only run
+// the ones with an extension it knows, so picking the bare name is what produced
+// "spawn C:\\Users\\...\\npm\\claude ENOENT" for a file that exists. Platform is
+// injected so the Windows behaviour is covered from any machine, and the Windows
+// runner in CI additionally executes the real thing further down.
+test('binaryCandidates asks for the Windows extensions and leaves POSIX alone', () => {
+  assert.deepEqual(binaryCandidates('claude', {}, 'linux'), ['claude']);
+  assert.deepEqual(binaryCandidates('claude', {}, 'darwin'), ['claude']);
+  assert.deepEqual(
+    binaryCandidates('claude', {}, 'win32'),
+    ['claude.COM', 'claude.EXE', 'claude.BAT', 'claude.CMD'],
+  );
+  assert.deepEqual(
+    binaryCandidates('claude', { PATHEXT: '.EXE;.CMD' }, 'win32'),
+    ['claude.EXE', 'claude.CMD'],
+  );
+  // A name that already carries an extension is taken as given.
+  assert.deepEqual(binaryCandidates('claude.cmd', {}, 'win32'), ['claude.cmd']);
+});
+
+test('resolveBinary prefers the runnable Windows shim over the bare one', (t) => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'kenari-winpath-'));
+  t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
+  fs.writeFileSync(path.join(dir, 'tool'), '#!/usr/bin/env node\n', { mode: 0o755 });
+  fs.writeFileSync(path.join(dir, 'tool.cmd'), '@echo off\r\n', { mode: 0o755 });
+  const env = { PATH: dir, PATHEXT: '.COM;.EXE;.BAT;.CMD' };
+  // Lowercased on the way out: Windows filesystems are case insensitive, so the name
+  // comes back in whatever case PATHEXT asked for, and spawnTarget matches either.
+  assert.equal(
+    path.basename(resolveBinary('tool', { env, platform: 'win32' })).toLowerCase(),
+    'tool.cmd',
+  );
+  // Same directory, POSIX: the bare shim is the runnable one.
+  assert.equal(path.basename(resolveBinary('tool', { env, platform: 'linux' })), 'tool');
+});
+
+test('resolveBinary on Windows reports not found rather than handing back an unrunnable file', (t) => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'kenari-winbare-'));
+  t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
+  fs.writeFileSync(path.join(dir, 'tool'), '#!/usr/bin/env node\n', { mode: 0o755 });
+  assert.throws(
+    () => resolveBinary('tool', { env: { PATH: dir }, platform: 'win32' }),
+    /not found/,
+  );
+});
+
+test('spawnTarget routes a script through the interpreter and everything else directly', () => {
+  const env = { ComSpec: 'C:\\Windows\\System32\\cmd.exe' };
+  for (const script of ['C:\\npm\\claude.cmd', 'C:\\npm\\claude.CMD', 'C:\\npm\\claude.bat']) {
+    const target = spawnTarget(script, ['-p', 'hello'], env, 'win32');
+    assert.equal(target.file, 'C:\\Windows\\System32\\cmd.exe');
+    assert.deepEqual(target.args, ['/d', '/c', script, '-p', 'hello']);
+  }
+  // A real executable needs no interpreter, and neither does anything on POSIX.
+  assert.deepEqual(
+    spawnTarget('C:\\Program Files\\claude.exe', ['-p'], env, 'win32'),
+    { file: 'C:\\Program Files\\claude.exe', args: ['-p'] },
+  );
+  assert.deepEqual(
+    spawnTarget('/usr/local/bin/claude', ['-p'], {}, 'darwin'),
+    { file: '/usr/local/bin/claude', args: ['-p'] },
+  );
+  // Falls back to cmd.exe when ComSpec is absent.
+  assert.equal(spawnTarget('a.cmd', [], {}, 'win32').file, 'cmd.exe');
+});
+
+// The cells above prove the decision. This one proves the decision is the right one,
+// and it can only run where it matters. Without it the suite stayed green on the
+// Windows runner while the CLI could not launch a single session there.
+test('a real .cmd shim runs, keeps its arguments and returns its exit code', (t) => {
+  if (process.platform !== 'win32') return t.skip('Windows-only');
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'kenari-realcmd-'));
+  t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
+  const script = path.join(dir, 'probe.cmd');
+  fs.writeFileSync(script, '@echo off\r\necho GOT %1\r\nexit /b 7\r\n');
+  const target = spawnTarget(script, ['a & b']);
+  const result = spawnSync(target.file, target.args, { encoding: 'utf8' });
+  assert.equal(result.error, undefined);
+  assert.equal(result.status, 7);
+  assert.match(result.stdout, /GOT "a & b"/);
 });
 
 test('resolveBinary skips excluded wrapper and supervisor returns child exit code', async (t) => {
