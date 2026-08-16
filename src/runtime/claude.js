@@ -23,6 +23,12 @@ export function findClaudeEnvConflicts(env = process.env) {
   return OVERRIDDEN_ENV.filter((name) => typeof env[name] === 'string' && env[name] !== '');
 }
 
+// True when no slot can produce a request for api.anthropic.com, which is what makes
+// it safe to hand Claude Code a stand-in credential.
+export function claudeRoutesEverySlot(roles = {}) {
+  return Object.keys(CLAUDE_ROLE_ENV).every((role) => roles[role]?.mode === 'fixed');
+}
+
 export function buildClaudeLaunch(options) {
   const inputEnv = options.env || process.env;
   const args = options.args || [];
@@ -39,9 +45,20 @@ export function buildClaudeLaunch(options) {
       `X-Kenari-Capability: ${options.routerCapabilityToken}`,
     ].filter(Boolean).join('\n');
   }
+  const roles = options.toolConfig?.roles || {};
   delete env.ANTHROPIC_AUTH_TOKEN;
   delete env.ANTHROPIC_API_KEY;
-  const roles = options.toolConfig?.roles || {};
+  // Claude Code refuses to send anything without a credential of its own, and dropping
+  // both of these left "Not logged in, please run /login" for anyone who has no Anthropic
+  // subscription, even with all six slots on Kenari. A native slot is why they go: the
+  // router forwards the client's credential verbatim to api.anthropic.com, where a
+  // Kenari key would 401. With every slot fixed there is no native slot to forward to,
+  // so a stand-in gets Claude Code past its own check. The router replaces it with the
+  // real Kenari credential on the way out, and it is deliberately not the Kenari key:
+  // should anything still reach Anthropic, it costs a 401 and not the key.
+  if (claudeRoutesEverySlot(roles) && options.standInCredential) {
+    env.ANTHROPIC_AUTH_TOKEN = options.standInCredential;
+  }
   for (const [role, variable] of Object.entries(CLAUDE_ROLE_ENV)) {
     const setting = roles[role];
     if (setting?.mode === 'fixed') env[variable] = setting.model;
