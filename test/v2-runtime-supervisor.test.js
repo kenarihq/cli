@@ -4,7 +4,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import http from 'node:http';
-import { buildClaudeLaunch, findClaudeEnvConflicts } from '../src/runtime/claude.js';
+import { buildClaudeLaunch, claudeRoutesEverySlot, findClaudeEnvConflicts } from '../src/runtime/claude.js';
 import {
   CODEX_API_BASE_URL,
   CODEX_CHATGPT_BASE_URL,
@@ -133,6 +133,51 @@ test('Claude launch survives the documented manual environment and takes it over
   assert.equal(built.env.ANTHROPIC_API_KEY, undefined);
   assert.equal(built.env.ANTHROPIC_DEFAULT_OPUS_MODEL, 'kenari/gpt-5');
   assert.equal(built.env.PATH, '/bin');
+});
+
+// Which slots are fixed decides whether a request can reach api.anthropic.com, and that
+// decides whether the stand-in credential is safe to hand over. Both inputs, all cells:
+// a stand-in must appear only when every slot is on Kenari, because Claude Code refuses
+// to send anything without a credential and the router replaces this one anyway.
+const ALL_FIXED = {
+  main: { mode: 'fixed', model: 'kenari/a' },
+  opus: { mode: 'fixed', model: 'kenari/a' },
+  sonnet: { mode: 'fixed', model: 'kenari/a' },
+  haiku: { mode: 'fixed', model: 'kenari/a' },
+  fable: { mode: 'fixed', model: 'kenari/a' },
+  subagents: { mode: 'fixed', model: 'kenari/a' },
+};
+const MIXED = { ...ALL_FIXED, sonnet: { mode: 'native' } };
+const ALL_NATIVE = Object.fromEntries(Object.keys(ALL_FIXED).map((role) => [role, { mode: 'native' }]));
+
+for (const [label, roles, standIn, expected] of [
+  ['every slot on kenari, stand-in offered', ALL_FIXED, 'stand-in-token', 'stand-in-token'],
+  ['every slot on kenari, no stand-in offered', ALL_FIXED, null, undefined],
+  ['one native slot, stand-in offered', MIXED, 'stand-in-token', undefined],
+  ['every slot native, stand-in offered', ALL_NATIVE, 'stand-in-token', undefined],
+]) {
+  test(`Claude credential stand-in: ${label}`, () => {
+    const built = buildClaudeLaunch({
+      toolConfig: { roles },
+      routerUrl: 'http://127.0.0.1:9',
+      standInCredential: standIn,
+      env: { PATH: '/bin', ANTHROPIC_AUTH_TOKEN: 'user-token', ANTHROPIC_API_KEY: 'user-key' },
+    });
+    assert.equal(built.env.ANTHROPIC_AUTH_TOKEN, expected);
+    // The person's own credential never survives, whichever cell this is.
+    assert.notEqual(built.env.ANTHROPIC_AUTH_TOKEN, 'user-token');
+    assert.equal(built.env.ANTHROPIC_API_KEY, undefined);
+  });
+}
+
+test('claudeRoutesEverySlot needs every slot, not just one', () => {
+  assert.equal(claudeRoutesEverySlot(ALL_FIXED), true);
+  assert.equal(claudeRoutesEverySlot(MIXED), false);
+  assert.equal(claudeRoutesEverySlot(ALL_NATIVE), false);
+  assert.equal(claudeRoutesEverySlot({}), false);
+  // A role missing from the config is not a fixed role.
+  const { subagents, ...missingOne } = ALL_FIXED;
+  assert.equal(claudeRoutesEverySlot(missingOne), false);
 });
 
 // An empty value is not a takeover worth reporting.

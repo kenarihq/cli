@@ -693,7 +693,14 @@ async function runTool(tool, args) {
         onEffort: (record) => { recordEffort(record).catch(() => {}); },
       },
       runtimeBuilder,
-      runtimeOptions: { toolConfig, catalogPath },
+      runtimeOptions: {
+        toolConfig,
+        catalogPath,
+        // Never the Kenari key. buildClaudeLaunch only puts it in the child env when no
+        // slot can reach api.anthropic.com, and the router swaps it for the real
+        // credential before anything leaves the machine.
+        standInCredential: tool === 'claude' ? `kenari-router-${randomBytes(24).toString('hex')}` : null,
+      },
     });
   } finally {
     if (catalogPath) removeFile(catalogPath);
