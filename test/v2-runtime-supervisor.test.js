@@ -12,6 +12,14 @@ import {
   codexKenariModels,
   resolveCodexNativeBase,
 } from '../src/runtime/codex.js';
+import {
+  GROK_API_ORIGIN,
+  GROK_CHAT_PROXY_ORIGIN,
+  buildGrokLaunch,
+  findGrokEnvConflicts,
+  grokRoutesEverySlot,
+  resolveGrokNativeBase,
+} from '../src/runtime/grok.js';
 import { spawn, spawnSync } from 'node:child_process';
 import {
   binaryCandidates,
@@ -493,4 +501,75 @@ test('resolveBinary skips excluded wrapper and supervisor returns child exit cod
     runtimeBuilder: ({ args, env }) => ({ args, env }),
   });
   assert.equal(code, 7);
+});
+
+const GROK_FIXED = {
+  main: { mode: 'fixed', model: 'kenari/glm-5-2' },
+  subagents: { mode: 'fixed', model: 'kenari/glm-5-2' },
+};
+const GROK_NATIVE = {
+  main: { mode: 'native' },
+  subagents: { mode: 'native' },
+};
+
+test('Grok launch points the chat proxy at the router and pins the default model', () => {
+  const built = buildGrokLaunch({
+    toolConfig: { roles: GROK_FIXED },
+    routerUrl: 'http://127.0.0.1:9',
+    nativeOrigin: GROK_CHAT_PROXY_ORIGIN,
+    standInCredential: 'stand-in',
+    env: { PATH: '/bin', XAI_API_KEY: 'user-key' },
+    args: ['-p', 'hello'],
+  });
+  assert.deepEqual(built.args, ['-p', 'hello']);
+  assert.equal(built.env.GROK_CLI_CHAT_PROXY_BASE_URL, 'http://127.0.0.1:9/v1');
+  assert.equal(built.env.GROK_MODELS_BASE_URL, 'http://127.0.0.1:9/v1');
+  assert.equal(built.env.GROK_DEFAULT_MODEL, 'kenari/glm-5-2');
+  assert.equal(built.env.XAI_API_KEY, 'stand-in');
+  assert.equal(built.env.GROK_XAI_API_BASE_URL, 'http://127.0.0.1:9/v1');
+});
+
+test('Grok API-key native also overrides GROK_XAI_API_BASE_URL and keeps the user key', () => {
+  const built = buildGrokLaunch({
+    toolConfig: { roles: GROK_NATIVE },
+    routerUrl: 'http://127.0.0.1:9/',
+    nativeOrigin: GROK_API_ORIGIN,
+    standInCredential: 'stand-in',
+    env: { PATH: '/bin', XAI_API_KEY: 'xai-user' },
+  });
+  assert.equal(built.env.GROK_CLI_CHAT_PROXY_BASE_URL, 'http://127.0.0.1:9/v1');
+  assert.equal(built.env.GROK_XAI_API_BASE_URL, 'http://127.0.0.1:9/v1');
+  assert.equal(built.env.GROK_MODELS_BASE_URL, undefined);
+  assert.equal(built.env.GROK_DEFAULT_MODEL, undefined);
+  assert.equal(built.env.XAI_API_KEY, 'xai-user');
+});
+
+test('grokRoutesEverySlot and env conflict reporting', () => {
+  assert.equal(grokRoutesEverySlot(GROK_FIXED), true);
+  assert.equal(grokRoutesEverySlot(GROK_NATIVE), false);
+  assert.equal(grokRoutesEverySlot({ main: { mode: 'fixed', model: 'kenari/a' } }), false);
+  assert.deepEqual(
+    findGrokEnvConflicts({ GROK_CLI_CHAT_PROXY_BASE_URL: 'https://cli-chat-proxy.grok.com/v1', PATH: '/bin' }),
+    ['GROK_CLI_CHAT_PROXY_BASE_URL'],
+  );
+  assert.deepEqual(findGrokEnvConflicts({ GROK_DEFAULT_MODEL: '', PATH: '/bin' }), []);
+});
+
+test('resolveGrokNativeBase prefers override, then auth.json, then XAI_API_KEY', (t) => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'kenari-grok-auth-'));
+  t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
+  const prev = process.env.GROK_HOME;
+  process.env.GROK_HOME = dir;
+  t.after(() => {
+    if (prev === undefined) delete process.env.GROK_HOME;
+    else process.env.GROK_HOME = prev;
+  });
+  assert.equal(
+    resolveGrokNativeBase({ KENARI_GROK_NATIVE_BASE_URL: 'https://example.test///' }),
+    'https://example.test',
+  );
+  assert.throws(() => resolveGrokNativeBase({}), /grok login/);
+  assert.equal(resolveGrokNativeBase({ XAI_API_KEY: 'xai-1' }), GROK_API_ORIGIN);
+  fs.writeFileSync(path.join(dir, 'auth.json'), '{}');
+  assert.equal(resolveGrokNativeBase({ XAI_API_KEY: 'xai-1' }), GROK_CHAT_PROXY_ORIGIN);
 });
