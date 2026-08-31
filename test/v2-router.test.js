@@ -467,3 +467,72 @@ test('status records the pinned level, flagged as pinned', async (t) => {
   assert.equal(records[0].pinned, true);
   assert.equal(records[0].gated, 'xhigh');
 });
+
+test('router injects kenari server tools on Kenari routes only', async (t) => {
+  const seen = [];
+  const nativeBase = await upstream(t, async (req, res) => {
+    seen.push({ route: 'native', body: await collect(req) });
+    res.end('{}');
+  });
+  const kenariBase = await upstream(t, async (req, res) => {
+    seen.push({ route: 'kenari', body: await collect(req) });
+    res.end('{}');
+  });
+  const router = await startRouter({
+    nativeBase,
+    kenariBase,
+    credential: 'kn-secret',
+    catalog: { models: [{ id: 'glm-5-2' }] },
+    injectTools: ['kenari:web_search'],
+  });
+  t.after(() => router.close());
+  await fetch(router.url + '/v1/chat/completions', {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ model: 'grok-build', tools: [{ type: 'function', name: 'bash' }] }),
+  });
+  await fetch(router.url + '/v1/chat/completions', {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ model: 'kenari/glm-5-2' }),
+  });
+  await fetch(router.url + '/v1/chat/completions', {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({
+      model: 'kenari/glm-5-2',
+      tools: [{ type: 'kenari:web_search' }, { type: 'function', name: 'bash' }],
+    }),
+  });
+  const native = seen.find((item) => item.route === 'native');
+  const kenariBodies = seen.filter((item) => item.route === 'kenari').map((item) => item.body);
+  assert.deepEqual(native.body.tools, [{ type: 'function', name: 'bash' }]);
+  assert.equal(kenariBodies.length, 2);
+  assert.equal(kenariBodies[0].model, 'glm-5-2');
+  assert.deepEqual(kenariBodies[0].tools, [{ type: 'kenari:web_search' }]);
+  assert.equal(kenariBodies[1].tools.filter((tool) => tool.type === 'kenari:web_search').length, 1);
+  assert.ok(kenariBodies[1].tools.some((tool) => tool.name === 'bash'));
+});
+
+test('router prefixes Kenari catalog ids when kenariCatalog is set', async (t) => {
+  const kenariBase = await upstream(t, (_req, res) => {
+    res.setHeader('content-type', 'application/json');
+    res.end(JSON.stringify({ data: [{ id: 'glm-5-2' }, { id: 'kenari/already' }] }));
+  });
+  const nativeBase = await upstream(t, (_req, res) => {
+    res.end(JSON.stringify({ data: [{ id: 'should-not-run' }] }));
+  });
+  const router = await startRouter({
+    nativeBase,
+    kenariBase,
+    credential: 'kn-secret',
+    catalog: { models: [{ id: 'glm-5-2' }] },
+    kenariCatalog: true,
+  });
+  t.after(() => router.close());
+  const response = await fetch(router.url + '/v1/models');
+  assert.equal(response.status, 200);
+  assert.deepEqual(await response.json(), {
+    data: [{ id: 'kenari/glm-5-2' }, { id: 'kenari/already' }],
+  });
+});

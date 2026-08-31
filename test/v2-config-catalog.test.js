@@ -12,14 +12,18 @@ import {
 } from '../src/catalog.js';
 
 function roles(tool) {
-  return tool === 'claude'
-    ? Object.fromEntries(['main', 'opus', 'sonnet', 'haiku', 'fable', 'subagents']
-      .map((role) => [role, { mode: 'native' }]))
-    : {
-        main: { mode: 'native' },
-        review: { mode: 'inherit' },
-        subagents: { mode: 'inherit' },
-      };
+  if (tool === 'claude') {
+    return Object.fromEntries(['main', 'opus', 'sonnet', 'haiku', 'fable', 'subagents']
+      .map((role) => [role, { mode: 'native' }]));
+  }
+  if (tool === 'grok') {
+    return { main: { mode: 'native' }, subagents: { mode: 'native' } };
+  }
+  return {
+    main: { mode: 'native' },
+    review: { mode: 'inherit' },
+    subagents: { mode: 'inherit' },
+  };
 }
 
 function tempHome(t) {
@@ -63,6 +67,21 @@ test('v2 config rejects partial roles, bad mode placement, and unprefixed fixed 
   assert.throws(() => validateConfig({ version: 2, tools: { claude: { roles: claude } } }), /unsupported mode/);
   claude.main = { mode: 'fixed', model: 'gpt-5' };
   assert.throws(() => validateConfig({ version: 2, tools: { claude: { roles: claude } } }), /kenari/);
+});
+
+test('v2 config accepts matching grok slots and rejects a subagents mismatch', () => {
+  const grok = roles('grok');
+  assert.deepEqual(validateConfig({ version: 2, tools: { grok: { roles: grok } } }).tools.grok.roles, grok);
+  grok.main = { mode: 'fixed', model: 'kenari/glm-5-2' };
+  grok.subagents = { mode: 'fixed', model: 'kenari/glm-5-2' };
+  assert.equal(
+    validateConfig({ version: 2, tools: { grok: { roles: grok } } }).tools.grok.roles.main.model,
+    'kenari/glm-5-2',
+  );
+  grok.subagents = { mode: 'native' };
+  assert.throws(() => validateConfig({ version: 2, tools: { grok: { roles: grok } } }), /inherit the parent/);
+  grok.subagents = { mode: 'fixed', model: 'kenari/other' };
+  assert.throws(() => validateConfig({ version: 2, tools: { grok: { roles: grok } } }), /inherit the parent/);
 });
 
 test('catalog normalizes reasoning options into three distinct states', () => {

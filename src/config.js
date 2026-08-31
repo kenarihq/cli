@@ -16,6 +16,10 @@ export const ROLE_DEFINITIONS = Object.freeze({
     review: ['native', 'fixed', 'inherit'],
     subagents: ['native', 'fixed', 'inherit'],
   }),
+  grok: Object.freeze({
+    main: ['native', 'fixed'],
+    subagents: ['native', 'fixed'],
+  }),
 });
 
 function fail(message) {
@@ -84,6 +88,14 @@ export function validateConfig(value) {
     tools[tool] = { roles: {} };
     for (const role of Object.keys(definition)) {
       tools[tool].roles[role] = validateRole(tool, role, entry.roles[role]);
+    }
+    if (tool === 'grok') {
+      const main = tools.grok.roles.main;
+      const subagents = tools.grok.roles.subagents;
+      if (main.mode !== subagents.mode
+        || (main.mode === 'fixed' && main.model !== subagents.model)) {
+        fail('grok.subagents must match grok.main; Grok subagents inherit the parent model');
+      }
     }
   }
   return { version: 2, tools };

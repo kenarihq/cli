@@ -20,6 +20,11 @@ export function codexHome() {
   return process.env.CODEX_HOME || path.join(os.homedir(), '.codex');
 }
 export function codexConfigPath() { return path.join(codexHome(), 'config.toml'); }
+export function grokHome() {
+  return process.env.GROK_HOME || path.join(os.homedir(), '.grok');
+}
+export function grokConfigPath() { return path.join(grokHome(), 'config.toml'); }
+export function grokAuthPath() { return path.join(grokHome(), 'auth.json'); }
 export function gatewayBase() {
   const raw = process.env.KENARI_BASE_URL || 'https://kenari.id';
   return raw.replace(/\/+$/, '');
