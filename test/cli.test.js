@@ -19,11 +19,18 @@ beforeEach(() => {
   process.env.KENARI_HOME = path.join(home, 'kenari');
   process.env.CLAUDE_CONFIG_DIR = path.join(home, 'claude-home');
   process.env.CODEX_HOME = path.join(home, 'codex-home');
+  process.env.GROK_HOME = path.join(home, 'grok-home');
   delete process.env.KENARI_BASE_URL;
   delete process.env.KENARI_ALLOW_HTTP;
   delete process.env.ANTHROPIC_BASE_URL;
   delete process.env.ANTHROPIC_AUTH_TOKEN;
   delete process.env.ANTHROPIC_API_KEY;
+  delete process.env.XAI_API_KEY;
+  delete process.env.KENARI_GROK_NATIVE_BASE_URL;
+  delete process.env.GROK_CLI_CHAT_PROXY_BASE_URL;
+  delete process.env.GROK_MODELS_BASE_URL;
+  delete process.env.GROK_XAI_API_BASE_URL;
+  delete process.env.GROK_DEFAULT_MODEL;
   output = [];
   stdout = [];
   stderr = [];
@@ -130,6 +137,8 @@ test('help exposes v2 surface and removed commands stay unknown', async () => {
   assert.equal(await run('help'), 0);
   assert.match(logs(), /kenari configure/);
   assert.match(logs(), /kenari claude/);
+  assert.match(logs(), /kenari grok/);
+  assert.match(logs(), /kenari update/);
   assert.doesNotMatch(logs(), /kenari use/);
   output = [];
   assert.equal(await run('use', 'claude'), 1);
@@ -161,22 +170,23 @@ test('non-interactive automation rejects partial roles', async () => {
   assert.match(logs(), /missing --review, --subagents/);
 });
 
-test('configure target picker defaults to both and maps every choice', async () => {
+test('configure target picker defaults to all and maps every choice', async () => {
   const { chooseConfigureTools } = await import('../src/cli.js');
   const expected = [
     ['claude'],
     ['codex'],
-    ['claude', 'codex'],
+    ['grok'],
+    ['claude', 'codex', 'grok'],
   ];
   for (let selection = 0; selection < expected.length; selection += 1) {
-    const chosen = await chooseConfigureTools(['claude', 'codex'], async (
+    const chosen = await chooseConfigureTools(['claude', 'codex', 'grok'], async (
       title,
       items,
       defaultIndex,
     ) => {
       assert.equal(title, 'Configure which tool?');
-      assert.deepEqual(items, ['Claude Code', 'Codex CLI', 'Both']);
-      assert.equal(defaultIndex, 2);
+      assert.deepEqual(items, ['Claude Code', 'Codex CLI', 'Grok Build', 'All']);
+      assert.equal(defaultIndex, 3);
       return selection;
     });
     assert.deepEqual(chosen, expected[selection]);
@@ -802,4 +812,112 @@ test('status marks a pinned level so it never silently disagrees with the sessio
   } } });
   assert.equal(await run('status'), 0);
   assert.match(logs(), /effort\s+kenari\/glm-5-2 requested=max \(pinned\) gated=xhigh 200/);
+});
+
+test('kenari update refuses a git checkout', async () => {
+  assert.equal(await run('update', '--check'), 1);
+  assert.match(logs(), /npm global install/);
+});
+
+test('grok automation copies matching slots and rejects a mismatch', async () => {
+  process.env.KENARI_BASE_URL = await stubCatalog(CATALOG);
+  process.env.KENARI_ALLOW_HTTP = '1';
+  const { setKey } = await import('../src/store.js');
+  setKey('kn-testkey123');
+  assert.equal(await run(
+    'configure', 'grok',
+    '--main', 'kenari/glm-5-2',
+    '--subagents', 'kenari/glm-5-2',
+    '--yes',
+  ), 0);
+  const config = JSON.parse(fs.readFileSync(path.join(process.env.KENARI_HOME, 'config.json'), 'utf8'));
+  assert.deepEqual(config.tools.grok.roles, {
+    main: { mode: 'fixed', model: 'kenari/glm-5-2' },
+    subagents: { mode: 'fixed', model: 'kenari/glm-5-2' },
+  });
+  output = [];
+  assert.equal(await run(
+    'configure', 'grok',
+    '--main', 'native',
+    '--subagents', 'kenari/glm-5-2',
+    '--yes',
+  ), 1);
+  assert.match(logs(), /inherit the parent model/);
+});
+
+test('all-Kenari Grok launches with only a Kenari login', async () => {
+  process.env.KENARI_BASE_URL = await stubCatalog(CATALOG);
+  process.env.KENARI_ALLOW_HTTP = '1';
+  const { setKey } = await import('../src/store.js');
+  setKey('kn-testkey123');
+  const bin = path.join(home, 'bin-grok-kenari');
+  writeFakeTool(bin, 'grok');
+  const oldPath = process.env.PATH;
+  process.env.PATH = `${bin}${path.delimiter}${oldPath || ''}`;
+  try {
+    assert.equal(await run(
+      'configure', 'grok',
+      '--main', 'kenari/glm-5-2',
+      '--subagents', 'kenari/glm-5-2',
+      '--yes',
+    ), 0);
+    output = [];
+    stdout = [];
+    stderr = [];
+    assert.equal(await run('grok', '--version'), 0);
+    assert.match(stderrLogs(), /main\s+-> kenari\/glm-5-2/);
+    assert.doesNotMatch(logs(), /grok login/);
+  } finally {
+    process.env.PATH = oldPath;
+  }
+});
+
+test('native Grok still needs a Grok login', async () => {
+  const bin = path.join(home, 'bin-grok-native');
+  writeFakeTool(bin, 'grok');
+  const oldPath = process.env.PATH;
+  process.env.PATH = `${bin}${path.delimiter}${oldPath || ''}`;
+  try {
+    assert.equal(await run(
+      'configure', 'grok',
+      '--main', 'native',
+      '--subagents', 'native',
+      '--yes',
+    ), 0);
+    output = [];
+    assert.equal(await run('grok', '--version'), 1);
+    assert.match(logs(), /grok login/);
+    process.env.XAI_API_KEY = 'xai-test';
+    output = [];
+    assert.equal(await run('grok', '--version'), 0);
+  } finally {
+    process.env.PATH = oldPath;
+  }
+});
+
+test('Grok launch reports overridden Grok environment variables', async () => {
+  process.env.KENARI_BASE_URL = await stubCatalog(CATALOG);
+  process.env.KENARI_ALLOW_HTTP = '1';
+  const { setKey } = await import('../src/store.js');
+  setKey('kn-testkey123');
+  const bin = path.join(home, 'bin-grok-env');
+  writeFakeTool(bin, 'grok');
+  const oldPath = process.env.PATH;
+  process.env.PATH = `${bin}${path.delimiter}${oldPath || ''}`;
+  try {
+    assert.equal(await run(
+      'configure', 'grok',
+      '--main', 'kenari/glm-5-2',
+      '--subagents', 'kenari/glm-5-2',
+      '--yes',
+    ), 0);
+    output = [];
+    stdout = [];
+    stderr = [];
+    process.env.GROK_CLI_CHAT_PROXY_BASE_URL = 'https://cli-chat-proxy.grok.com/v1';
+    assert.equal(await run('grok', '--version'), 0);
+    assert.match(stderrLogs(), /ignoring GROK_CLI_CHAT_PROXY_BASE_URL/);
+  } finally {
+    process.env.PATH = oldPath;
+  }
 });
