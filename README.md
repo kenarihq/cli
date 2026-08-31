@@ -1,18 +1,19 @@
 # @kenarihq/cli
 
-Route native and Kenari models inside one Claude Code or Codex CLI session.
-Plain `claude` and `codex` stay native. Kenari routing only applies when launched
-through the wrapper:
+Route native and Kenari models inside one Claude Code, Codex, or Grok Build
+session. Plain `claude`, `codex`, and `grok` stay native. Kenari routing only
+applies when launched through the wrapper:
 
 ```bash
 kenari claude [args...]
 kenari codex [args...]
+kenari grok [args...]
 ```
 
 Each launch starts a private router on `127.0.0.1` with a random port, starts the
 original CLI with process-scoped overrides, forwards terminal I/O and signals,
 then stops the router. No provider setting or credential is written into Claude
-Code or Codex configuration.
+Code, Codex, or Grok configuration.
 
 ## Install
 
@@ -24,19 +25,25 @@ kenari configure
 
 Node.js 18 or newer is required.
 
-When Claude Code and Codex are both installed, `kenari configure` asks which
-tool to configure and defaults to `Both`. If only one is installed, Kenari
-selects it automatically. Non-interactive use must name `claude` or `codex`.
+When more than one wrapped tool is installed, `kenari configure` asks which
+tool to configure and defaults to `All`. If only one is installed, Kenari
+selects it automatically. Non-interactive use must name `claude`, `codex`, or
+`grok`.
+
+`kenari update` upgrades the npm global install. `--check` reports current vs
+latest without installing. A git checkout is refused.
 
 ## Commands
 
 ```text
-kenari configure [claude|codex]
-kenari reset [claude|codex]
+kenari configure [claude|codex|grok]
+kenari reset [claude|codex|grok]
 kenari claude [args...]
 kenari codex [args...]
+kenari grok [args...]
 kenari status [--check] [--json]
 kenari models [--json]
+kenari update [--check]
 kenari login [--api-key]
 kenari logout
 kenari help
@@ -97,9 +104,19 @@ Codex supports these roles:
 - `review`
 - `subagents`
 
+Grok Build supports these roles:
+
+- `main`
+- `subagents`
+
 Every role can stay `native` or select a fixed `kenari/<model-id>`. Codex main
 also supports `picker`. Codex review and subagents also support `inherit`.
 Native is always the default.
+
+Grok subagents inherit the parent model, so `main` and `subagents` must match.
+Kenari-routed Grok requests include Kenari web search (`kenari:web_search`).
+Native Grok requests keep Grok's own search. All-Kenari Grok needs only
+`kenari login`. Native Grok still needs `grok login` or `XAI_API_KEY`.
 
 For Codex, Kenari detects whether `codex login` uses ChatGPT or an API key and
 keeps native requests on the matching OpenAI upstream. The process-scoped
@@ -122,6 +139,11 @@ kenari configure codex \
   --main picker \
   --review inherit \
   --subagents kenari/gpt-5.4 \
+  --yes
+
+kenari configure grok \
+  --main kenari/glm-5-2 \
+  --subagents kenari/glm-5-2 \
   --yes
 ```
 
@@ -179,11 +201,11 @@ Kenari owns these files:
 The directory uses mode `0700` and files use mode `0600` on POSIX systems.
 Writes are atomic. The Kenari credential is stored only in
 `credentials.json`, never in Claude Code settings, Codex configuration,
-generated model catalogs, command arguments, or logs.
+Grok configuration, generated model catalogs, command arguments, or logs.
 
-`KENARI_HOME`, `CLAUDE_CONFIG_DIR`, and `CODEX_HOME` override their matching
-directories. `KENARI_BASE_URL` overrides the Kenari gateway. HTTP gateways are
-rejected unless `KENARI_ALLOW_HTTP=1` is set for local development.
+`KENARI_HOME`, `CLAUDE_CONFIG_DIR`, `CODEX_HOME`, and `GROK_HOME` override their
+matching directories. `KENARI_BASE_URL` overrides the Kenari gateway. HTTP
+gateways are rejected unless `KENARI_ALLOW_HTTP=1` is set for local development.
 
 ## Catalog and offline behavior
 

@@ -66,6 +66,35 @@ function modelMap(catalog) {
   return new Map((catalog?.models || []).map((model) => [model.id, model]));
 }
 
+function modelsListPath(url) {
+  const pathOnly = String(url || '/').split('?')[0];
+  return /\/models\/?$/.test(pathOnly);
+}
+
+function prefixKenariCatalog(raw) {
+  let parsed;
+  try { parsed = JSON.parse(raw.toString('utf8')); } catch { return raw; }
+  const list = Array.isArray(parsed?.data) ? parsed.data
+    : Array.isArray(parsed?.models) ? parsed.models
+    : null;
+  if (!list) return raw;
+  for (const entry of list) {
+    if (entry && typeof entry.id === 'string' && !entry.id.startsWith('kenari/')) {
+      entry.id = `kenari/${entry.id}`;
+    }
+  }
+  return Buffer.from(JSON.stringify(parsed));
+}
+
+function injectServerTools(outgoing, types) {
+  if (!Array.isArray(types) || !types.length) return outgoing;
+  const tools = Array.isArray(outgoing.tools) ? [...outgoing.tools] : [];
+  for (const type of types) {
+    if (!tools.some((tool) => tool && tool.type === type)) tools.push({ type });
+  }
+  return { ...outgoing, tools };
+}
+
 function compatibilityLimit(model, body, compatibility) {
   if (!model?.output_limit || !compatibility) return null;
   const requested = body.max_tokens ?? body.max_output_tokens;
@@ -137,13 +166,19 @@ async function startRouterServer(options) {
       return;
     }
 
-    const selected = typeof body?.model === 'string' ? body.model : '';
-    const isKenari = selected.startsWith('kenari/');
-    const id = isKenari
-      ? stripClaudeOneMMarker(selected.slice('kenari/'.length))
-      : selected;
-    const model = isKenari ? models.get(id) : null;
-    if (isKenari && (!id || !model)) {
+    const requestPath = req.url?.startsWith('/') ? req.url : `/${req.url || ''}`;
+    const catalogList = Boolean(options.kenariCatalog)
+      && req.method === 'GET'
+      && modelsListPath(requestPath);
+    const selected = catalogList ? '' : (typeof body?.model === 'string' ? body.model : '');
+    const isKenari = catalogList || selected.startsWith('kenari/');
+    const id = catalogList
+      ? ''
+      : isKenari
+        ? stripClaudeOneMMarker(selected.slice('kenari/'.length))
+        : selected;
+    const model = isKenari && !catalogList ? models.get(id) : null;
+    if (isKenari && !catalogList && (!id || !model)) {
       replyJson(res, 400, `unknown or unavailable Kenari model "${selected}"`);
       return;
     }
@@ -153,15 +188,16 @@ async function startRouterServer(options) {
     }
 
     const target = isKenari ? kenariBase : nativeBase;
-    const outgoing = { ...(body || {}) };
+    let outgoing = { ...(body || {}) };
     // A pinned slot wins over whatever the session sent. Claude Code's effort is a
     // single session-wide setting, so a user running a native orchestrator that
     // delegates to a Kenari slot has no way to ask for a level on that slot alone.
     // The pin is that missing control, and it is the user's own configuration, not the
     // router second-guessing a request. Native routes are never touched.
     let pinned;
-    if (isKenari) {
+    if (isKenari && !catalogList) {
       outgoing.model = id;
+      outgoing = injectServerTools(outgoing, options.injectTools);
       pinned = effortPins.get(id);
       if (pinned) {
         const config = outgoing.output_config;
@@ -171,12 +207,14 @@ async function startRouterServer(options) {
         };
       }
     }
-    const raised = isKenari ? compatibilityLimit(model, outgoing, options.compatibility) : null;
+    const raised = isKenari && !catalogList
+      ? compatibilityLimit(model, outgoing, options.compatibility)
+      : null;
     if (raised !== null) {
       if ('max_output_tokens' in outgoing) outgoing.max_output_tokens = raised;
       else outgoing.max_tokens = raised;
     }
-    const payload = isKenari ? Buffer.from(JSON.stringify(outgoing)) : raw;
+    const payload = isKenari && !catalogList ? Buffer.from(JSON.stringify(outgoing)) : raw;
     const headers = safeHeaders(req.headers, REQUEST_STRIP);
     if (isKenari) {
       for (const name of NATIVE_AUTH_HEADERS) delete headers[name];
@@ -185,7 +223,6 @@ async function startRouterServer(options) {
     headers.host = target.host;
     headers['content-length'] = String(payload.length);
     const basePath = target.pathname.replace(/\/$/, '');
-    const requestPath = req.url?.startsWith('/') ? req.url : `/${req.url || ''}`;
     const transport = target.protocol === 'https:' ? https : http;
     const upstream = transport.request({
       protocol: target.protocol,
@@ -195,9 +232,7 @@ async function startRouterServer(options) {
       path: basePath + requestPath,
       headers,
     }, (upstreamRes) => {
-      const responseHeaders = safeHeaders(upstreamRes.headers, RESPONSE_STRIP);
-      res.writeHead(upstreamRes.statusCode || 502, responseHeaders);
-      if (onEffort && isKenari) recordEffort(upstreamRes, body, id, pinned);
+      if (onEffort && isKenari && !catalogList) recordEffort(upstreamRes, body, id, pinned);
       const terminateDownstream = (error) => {
         if (!res.destroyed) res.destroy(error);
       };
@@ -205,6 +240,21 @@ async function startRouterServer(options) {
         terminateDownstream(new Error(`${isKenari ? 'Kenari' : 'native'} upstream response aborted`));
       });
       upstreamRes.on('error', terminateDownstream);
+      if (catalogList) {
+        const chunks = [];
+        upstreamRes.on('data', (chunk) => chunks.push(chunk));
+        upstreamRes.on('end', () => {
+          const rewritten = prefixKenariCatalog(Buffer.concat(chunks));
+          const responseHeaders = safeHeaders(upstreamRes.headers, RESPONSE_STRIP);
+          delete responseHeaders['content-length'];
+          responseHeaders['content-length'] = String(rewritten.length);
+          res.writeHead(upstreamRes.statusCode || 502, responseHeaders);
+          res.end(rewritten);
+        });
+        return;
+      }
+      const responseHeaders = safeHeaders(upstreamRes.headers, RESPONSE_STRIP);
+      res.writeHead(upstreamRes.statusCode || 502, responseHeaders);
       upstreamRes.on('close', () => {
         if (!upstreamRes.complete) {
           terminateDownstream(new Error(`${isKenari ? 'Kenari' : 'native'} upstream response closed early`));
@@ -320,6 +370,8 @@ export async function startRouter(options) {
         bodyLimit: options.bodyLimit,
         compatibility: options.compatibility || null,
         effortPins: options.effortPins || null,
+        injectTools: options.injectTools || null,
+        kenariCatalog: Boolean(options.kenariCatalog),
         debug: typeof options.debug === 'function',
         onEffort: typeof options.onEffort === 'function',
       },

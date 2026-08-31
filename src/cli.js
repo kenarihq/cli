@@ -41,8 +41,16 @@ import {
   loadCodexNativeModels,
   resolveCodexNativeBase,
 } from './runtime/codex.js';
+import {
+  GROK_API_ORIGIN,
+  buildGrokLaunch,
+  findGrokEnvConflicts,
+  grokRoutesEverySlot,
+  resolveGrokNativeBase,
+} from './runtime/grok.js';
 import { startRouter } from './router.js';
 import { detectOrphanedV1Signatures, detectV1State, migrateV1 } from './migrate.js';
+import { runUpdate } from './update.js';
 
 const isTTY = () => Boolean(process.stdin.isTTY && process.stdout.isTTY);
 const TOOLS = Object.keys(ROLE_DEFINITIONS);
@@ -246,8 +254,31 @@ async function configureCodex(current) {
   return roles;
 }
 
+async function configureGrok(current) {
+  const roles = defaultRoles('grok');
+  const modes = ['native', 'fixed'];
+  let defaultIndex = modes.indexOf(current?.main?.mode);
+  if (defaultIndex < 0) defaultIndex = 0;
+  const selected = modes[await pickNumber(
+    'Grok: route the session through Kenari?',
+    ['native only', 'fixed Kenari model'],
+    defaultIndex,
+  )];
+  roles.main = selected === 'fixed'
+    ? await pickFixedModel('grok', 'main', current?.main)
+    : { mode: 'native' };
+  roles.subagents = { ...roles.main };
+  return roles;
+}
+
+function joinEnglish(items) {
+  if (items.length <= 1) return items[0] || '';
+  if (items.length === 2) return `${items[0]} and ${items[1]}`;
+  return `${items.slice(0, -1).join(', ')}, and ${items[items.length - 1]}`;
+}
+
 function printRoutingSummary(tool, roles) {
-  console.log(tool === 'claude' ? 'Claude Code' : 'Codex');
+  console.log(findAdapter(tool)?.name || tool);
   for (const [role, value] of Object.entries(roles)) {
     const target = value.mode === 'fixed' ? value.model : value.mode;
     console.log(`  ${role.padEnd(12)} ${target}`);
@@ -271,7 +302,10 @@ export async function chooseConfigureTools(installed, choose = pickNumber) {
     label: adapter.name,
     tools: [adapter.id],
   }));
-  options.push({ label: 'Both', tools: registry.map((adapter) => adapter.id) });
+  options.push({
+    label: registry.length === 2 ? 'Both' : 'All',
+    tools: registry.map((adapter) => adapter.id),
+  });
   const selected = await choose(
     'Configure which tool?',
     options.map((option) => option.label),
@@ -289,14 +323,14 @@ async function cmdConfigure(argv) {
     tools = [requested];
   } else {
     if (flags.yes) {
-      throw new KenariError('--yes requires an explicit tool: kenari configure claude|codex');
+      throw new KenariError(`--yes requires an explicit tool: kenari configure ${TOOLS.join('|')}`);
     }
     if (!isTTY()) {
       throw new KenariError('non-interactive configuration requires an explicit tool');
     }
     const installed = detectedTools();
     if (!installed.length) {
-      console.log('warning: Claude Code and Codex were not detected');
+      console.log(`warning: ${joinEnglish(registry.map((adapter) => adapter.name))} were not detected`);
     }
     tools = await chooseConfigureTools(installed);
   }
@@ -334,7 +368,9 @@ async function cmdConfigure(argv) {
         ? await configureAdvanced(tool, current)
         : tool === 'claude'
           ? await configureClaude(current)
-          : await configureCodex(current);
+          : tool === 'grok'
+            ? await configureGrok(current)
+            : await configureCodex(current);
     }
     await catalogForRoles(roles);
     config = {
@@ -447,6 +483,7 @@ async function runStatusChecks(status) {
   }
   checks.native_anthropic = await boundedReachable('https://api.anthropic.com');
   checks.native_openai = await boundedReachable('https://api.openai.com');
+  checks.native_xai = await boundedReachable('https://api.x.ai');
   const key = getKey();
   if (!key) {
     checks.kenari = { ok: false, error: 'login required' };
@@ -628,8 +665,7 @@ function printEffortCapabilities(tool, toolConfig, cache) {
 // Names the variables this session took over. The manual setup in /docs/tools exports
 // them, so a person who followed the docs and then reached for the CLI sees exactly
 // which of their exports stopped mattering, and the run continues.
-function printClaudeEnvOverrides(env) {
-  const overridden = findClaudeEnvConflicts(env || process.env);
+function printEnvOverrideWarning(overridden) {
   if (!overridden.length) return;
   const named = overridden.length > 1
     ? `${overridden.slice(0, -1).join(', ')} and ${overridden[overridden.length - 1]}`
@@ -637,6 +673,14 @@ function printClaudeEnvOverrides(env) {
   console.error(`kenari: warning: ignoring ${named}`);
   console.error('        from your environment; this session routes through kenari.');
   console.error('        Run kenari status to see the active routing.');
+}
+
+function printClaudeEnvOverrides(env) {
+  printEnvOverrideWarning(findClaudeEnvConflicts(env || process.env));
+}
+
+function printGrokEnvOverrides(env) {
+  printEnvOverrideWarning(findGrokEnvConflicts(env || process.env));
 }
 
 async function runTool(tool, args) {
@@ -658,17 +702,31 @@ async function runTool(tool, args) {
     catalogPath = path.join(runtimeDir(), `models-${process.pid}-${randomBytes(6).toString('hex')}.json`);
     writeMergedCodexCatalog(loadCodexNativeModels(binary), cache, catalogPath);
   }
-  const kenariBase = tool === 'codex' ? `${gatewayBase()}/v1` : gatewayBase();
-  const nativeBase = tool === 'codex'
-    ? resolveCodexNativeBase(binary, process.env)
-    : (process.env.KENARI_CLAUDE_NATIVE_BASE_URL || 'https://api.anthropic.com');
-  const buildLaunch = tool === 'codex' ? buildCodexLaunch : buildClaudeLaunch;
+  let kenariBase;
+  let nativeBase;
+  let buildLaunch;
+  if (tool === 'codex') {
+    kenariBase = `${gatewayBase()}/v1`;
+    nativeBase = resolveCodexNativeBase(binary, process.env);
+    buildLaunch = buildCodexLaunch;
+  } else if (tool === 'grok') {
+    kenariBase = gatewayBase();
+    nativeBase = grokRoutesEverySlot(toolConfig.roles)
+      ? (process.env.KENARI_GROK_NATIVE_BASE_URL || GROK_API_ORIGIN)
+      : resolveGrokNativeBase(process.env);
+    buildLaunch = buildGrokLaunch;
+  } else {
+    kenariBase = gatewayBase();
+    nativeBase = process.env.KENARI_CLAUDE_NATIVE_BASE_URL || 'https://api.anthropic.com';
+    buildLaunch = buildClaudeLaunch;
+  }
   // Print only once the launch is known to be viable. Printed earlier, a run that then
   // died in buildLaunch led with several lines of capability advice and ended in a
   // fatal error, which reads as though the advice caused it.
   const runtimeBuilder = (options) => {
     const built = buildLaunch(options);
     if (tool === 'claude') printClaudeEnvOverrides(options.env);
+    if (tool === 'grok') printGrokEnvOverrides(options.env);
     printEffortCapabilities(tool, toolConfig, cache);
     return built;
   };
@@ -688,6 +746,8 @@ async function runTool(tool, args) {
             .filter((role) => role.mode === 'fixed' && role.effort)
             .map((role) => [role.model.slice('kenari/'.length), role.effort]),
         ),
+        injectTools: tool === 'grok' ? ['kenari:web_search'] : null,
+        kenariCatalog: tool === 'grok' && grokRoutesEverySlot(toolConfig.roles),
         // Diagnostic, never load bearing: a failed write must not disturb the session,
         // and nothing is printed because the tool owns the terminal from here.
         onEffort: (record) => { recordEffort(record).catch(() => {}); },
@@ -696,10 +756,13 @@ async function runTool(tool, args) {
       runtimeOptions: {
         toolConfig,
         catalogPath,
-        // Never the Kenari key. buildClaudeLaunch only puts it in the child env when no
-        // slot can reach api.anthropic.com, and the router swaps it for the real
+        nativeOrigin: tool === 'grok' ? nativeBase : undefined,
+        // Never the Kenari key. Stand-in credentials only go in the child env when no
+        // slot can reach the native provider, and the router swaps them for the real
         // credential before anything leaves the machine.
-        standInCredential: tool === 'claude' ? `kenari-router-${randomBytes(24).toString('hex')}` : null,
+        standInCredential: tool === 'claude' || tool === 'grok'
+          ? `kenari-router-${randomBytes(24).toString('hex')}`
+          : null,
       },
     });
   } finally {
@@ -842,15 +905,23 @@ async function cmdLogout() {
   return 0;
 }
 
+async function cmdUpdate(argv) {
+  const { flags, rest } = parseFlags(argv);
+  if (rest.length) throw new KenariError('usage: kenari update [--check]');
+  return runUpdate({ checkOnly: Boolean(flags.check) });
+}
+
 const USAGE = `kenari CLI
 
 usage:
-  kenari configure [claude|codex] [role flags] [--yes]
-  kenari reset [claude|codex]
+  kenari configure [claude|codex|grok] [role flags] [--yes]
+  kenari reset [claude|codex|grok]
   kenari claude [args...]
   kenari codex [args...]
+  kenari grok [args...]
   kenari status [--check] [--json]
   kenari models [--json]
+  kenari update [--check]
   kenari login [--api-key]
   kenari logout
   kenari help
@@ -867,9 +938,12 @@ export async function main(argv) {
     }
     if (command === 'configure') return await cmdConfigure(rest);
     if (command === 'reset') return await cmdReset(rest);
-    if (command === 'claude' || command === 'codex') return await runTool(command, rest);
+    if (command === 'claude' || command === 'codex' || command === 'grok') {
+      return await runTool(command, rest);
+    }
     if (command === 'status') return await cmdStatus(rest);
     if (command === 'models') return await cmdModels(rest);
+    if (command === 'update') return await cmdUpdate(rest);
     if (command === 'login') return await cmdLogin(rest);
     if (command === 'logout') return await cmdLogout();
     if (command === '--help' || command === '-h' || command === 'help') {
