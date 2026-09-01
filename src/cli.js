@@ -200,9 +200,25 @@ async function pickFixedModel(tool, role, current) {
   return chosen;
 }
 
+function promptedRoleIds(tool) {
+  return Object.keys(ROLE_DEFINITIONS[tool])
+    .filter((role) => !(tool === 'grok' && role === 'subagents'));
+}
+
+function visibleRoleEntries(tool, roles) {
+  return Object.entries(roles || {})
+    .filter(([role]) => !(tool === 'grok' && role === 'subagents'));
+}
+
+function followGrokSubagents(roles) {
+  roles.subagents = { ...roles.main };
+  return roles;
+}
+
 async function configureAdvanced(tool, current) {
   const roles = {};
   for (const [role, modes] of Object.entries(ROLE_DEFINITIONS[tool])) {
+    if (tool === 'grok' && role === 'subagents') continue;
     const labels = modes.map((mode) => mode === 'fixed' ? 'fixed Kenari model' : mode);
     const previous = current?.[role]?.mode;
     let defaultIndex = modes.indexOf(previous);
@@ -213,6 +229,7 @@ async function configureAdvanced(tool, current) {
       ? await pickFixedModel(tool, role, current?.[role])
       : { mode };
   }
+  if (tool === 'grok') followGrokSubagents(roles);
   return roles;
 }
 
@@ -267,8 +284,7 @@ async function configureGrok(current) {
   roles.main = selected === 'fixed'
     ? await pickFixedModel('grok', 'main', current?.main)
     : { mode: 'native' };
-  roles.subagents = { ...roles.main };
-  return roles;
+  return followGrokSubagents(roles);
 }
 
 function joinEnglish(items) {
@@ -279,7 +295,7 @@ function joinEnglish(items) {
 
 function printRoutingSummary(tool, roles) {
   console.log(findAdapter(tool)?.name || tool);
-  for (const [role, value] of Object.entries(roles)) {
+  for (const [role, value] of visibleRoleEntries(tool, roles)) {
     const target = value.mode === 'fixed' ? value.model : value.mode;
     console.log(`  ${role.padEnd(12)} ${target}`);
   }
@@ -343,12 +359,13 @@ async function cmdConfigure(argv) {
     let roles;
     if (flags.yes) {
       const roleIds = Object.keys(ROLE_DEFINITIONS[tool]);
-      const missing = roleIds.filter((role) => !(role in flags));
+      const missing = promptedRoleIds(tool).filter((role) => !(role in flags));
       if (missing.length) {
         throw new KenariError(`--yes requires every ${tool} role; missing --${missing.join(', --')}`);
       }
       roles = {};
       for (const role of roleIds) {
+        if (!(role in flags)) continue;
         roles[role] = parseRoleValue(tool, role, flags[role]);
         const pin = flags[`${role}-effort`];
         if (pin !== undefined) {
@@ -361,16 +378,19 @@ async function cmdConfigure(argv) {
           roles[role].effort = pin.trim();
         }
       }
+      if (tool === 'grok' && !('subagents' in flags)) followGrokSubagents(roles);
     } else {
       if (!isTTY()) throw new KenariError('non-interactive configuration requires --yes and every role');
-      const advanced = await askYesNo(`Use advanced ${tool} role configuration?`, false);
-      roles = advanced
-        ? await configureAdvanced(tool, current)
-        : tool === 'claude'
-          ? await configureClaude(current)
-          : tool === 'grok'
-            ? await configureGrok(current)
+      if (tool === 'grok') {
+        roles = await configureGrok(current);
+      } else {
+        const advanced = await askYesNo(`Use advanced ${tool} role configuration?`, false);
+        roles = advanced
+          ? await configureAdvanced(tool, current)
+          : tool === 'claude'
+            ? await configureClaude(current)
             : await configureCodex(current);
+      }
     }
     await catalogForRoles(roles);
     config = {
@@ -522,7 +542,7 @@ async function cmdStatus(argv) {
   }
   for (const [tool, roles] of Object.entries(status.tools)) {
     console.log(`${tool.padEnd(11)}${roles ? 'configured' : 'not configured'}`);
-    for (const [role, target] of Object.entries(roles || {})) {
+    for (const [role, target] of visibleRoleEntries(tool, roles)) {
       console.log(`  ${role.padEnd(12)} ${target}`);
     }
   }
@@ -610,7 +630,7 @@ async function ensureConfigured(tool) {
 const CLAUDE_EFFORT_LEVELS = ['low', 'medium', 'high', 'xhigh', 'max'];
 
 function printEffortCapabilities(tool, toolConfig, cache) {
-  const fixed = Object.entries(toolConfig.roles)
+  const fixed = visibleRoleEntries(tool, toolConfig.roles)
     .filter(([, role]) => role.mode === 'fixed')
     .map(([slot, role]) => {
       const modelId = role.model.slice('kenari/'.length);

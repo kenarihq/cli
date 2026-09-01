@@ -168,6 +168,10 @@ test('native-only automation needs no login or catalog', async () => {
 test('non-interactive automation rejects partial roles', async () => {
   assert.equal(await run('configure', 'codex', '--main', 'native', '--yes'), 1);
   assert.match(logs(), /missing --review, --subagents/);
+  output = [];
+  assert.equal(await run('configure', 'grok', '--yes'), 1);
+  assert.match(logs(), /missing --main/);
+  assert.doesNotMatch(logs(), /subagents/);
 });
 
 test('configure target picker defaults to all and maps every choice', async () => {
@@ -824,17 +828,18 @@ test('grok automation copies matching slots and rejects a mismatch', async () =>
   process.env.KENARI_ALLOW_HTTP = '1';
   const { setKey } = await import('../src/store.js');
   setKey('kn-testkey123');
-  assert.equal(await run(
-    'configure', 'grok',
-    '--main', 'kenari/glm-5-2',
-    '--subagents', 'kenari/glm-5-2',
-    '--yes',
-  ), 0);
+  assert.equal(await run('configure', 'grok', '--main', 'kenari/glm-5-2', '--yes'), 0);
   const config = JSON.parse(fs.readFileSync(path.join(process.env.KENARI_HOME, 'config.json'), 'utf8'));
   assert.deepEqual(config.tools.grok.roles, {
     main: { mode: 'fixed', model: 'kenari/glm-5-2' },
     subagents: { mode: 'fixed', model: 'kenari/glm-5-2' },
   });
+  assert.match(logs(), /main\s+kenari\/glm-5-2/);
+  assert.doesNotMatch(logs(), /subagents/);
+  output = [];
+  assert.equal(await run('status'), 0);
+  assert.match(logs(), /main\s+kenari\/glm-5-2/);
+  assert.doesNotMatch(logs(), /subagents/);
   output = [];
   assert.equal(await run(
     'configure', 'grok',
@@ -855,17 +860,13 @@ test('all-Kenari Grok launches with only a Kenari login', async () => {
   const oldPath = process.env.PATH;
   process.env.PATH = `${bin}${path.delimiter}${oldPath || ''}`;
   try {
-    assert.equal(await run(
-      'configure', 'grok',
-      '--main', 'kenari/glm-5-2',
-      '--subagents', 'kenari/glm-5-2',
-      '--yes',
-    ), 0);
+    assert.equal(await run('configure', 'grok', '--main', 'kenari/glm-5-2', '--yes'), 0);
     output = [];
     stdout = [];
     stderr = [];
     assert.equal(await run('grok', '--version'), 0);
     assert.match(stderrLogs(), /main\s+-> kenari\/glm-5-2/);
+    assert.doesNotMatch(stderrLogs(), /subagents/);
     assert.doesNotMatch(logs(), /grok login/);
   } finally {
     process.env.PATH = oldPath;
@@ -878,12 +879,7 @@ test('native Grok still needs a Grok login', async () => {
   const oldPath = process.env.PATH;
   process.env.PATH = `${bin}${path.delimiter}${oldPath || ''}`;
   try {
-    assert.equal(await run(
-      'configure', 'grok',
-      '--main', 'native',
-      '--subagents', 'native',
-      '--yes',
-    ), 0);
+    assert.equal(await run('configure', 'grok', '--main', 'native', '--yes'), 0);
     output = [];
     assert.equal(await run('grok', '--version'), 1);
     assert.match(logs(), /grok login/);
@@ -905,12 +901,7 @@ test('Grok launch reports overridden Grok environment variables', async () => {
   const oldPath = process.env.PATH;
   process.env.PATH = `${bin}${path.delimiter}${oldPath || ''}`;
   try {
-    assert.equal(await run(
-      'configure', 'grok',
-      '--main', 'kenari/glm-5-2',
-      '--subagents', 'kenari/glm-5-2',
-      '--yes',
-    ), 0);
+    assert.equal(await run('configure', 'grok', '--main', 'kenari/glm-5-2', '--yes'), 0);
     output = [];
     stdout = [];
     stderr = [];
