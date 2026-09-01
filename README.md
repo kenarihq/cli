@@ -104,16 +104,16 @@ Codex supports these roles:
 - `review`
 - `subagents`
 
-Grok Build supports these roles:
+Grok Build supports:
 
 - `main`
-- `subagents`
 
 Every role can stay `native` or select a fixed `kenari/<model-id>`. Codex main
 also supports `picker`. Codex review and subagents also support `inherit`.
 Native is always the default.
 
-Grok subagents inherit the parent model, so `main` and `subagents` must match.
+Grok subagents inherit the parent model, so Kenari copies `main` onto that slot
+and does not ask for it. A matching `--subagents` flag is still accepted.
 Kenari-routed Grok requests include Kenari web search (`kenari:web_search`).
 Native Grok requests keep Grok's own search. All-Kenari Grok needs only
 `kenari login`. Native Grok still needs `grok login` or `XAI_API_KEY`.
@@ -123,7 +123,7 @@ keeps native requests on the matching OpenAI upstream. The process-scoped
 router disables request compression and WebSocket transport so it can inspect
 the model ID before selecting the upstream.
 
-Automation must set every role:
+Automation must set every role. Grok only needs `--main`:
 
 ```bash
 kenari configure claude \
@@ -143,7 +143,6 @@ kenari configure codex \
 
 kenari configure grok \
   --main kenari/glm-5-2 \
-  --subagents kenari/glm-5-2 \
   --yes
 ```
 
