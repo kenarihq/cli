@@ -11,6 +11,7 @@ import {
   getKey,
   loadState,
   maskKey,
+  readJson,
   recordEffort,
   removeFile,
   setKey,
@@ -32,10 +33,14 @@ import {
 } from './catalog.js';
 import { fetchCatalog, formatRp } from './gateway.js';
 import { ask, askSecret, askYesNo, pickNumber } from './prompt.js';
-import { gatewayBase, modelCachePath, runtimeDir } from './paths.js';
+import { claudeSettingsPath, gatewayBase, modelCachePath, runtimeDir } from './paths.js';
 import { genPkce, genState, buildLoopbackUrl, browserCommand, startCallbackServer } from './oauth.js';
 import { resolveBinary, runWrappedTool } from './supervisor.js';
-import { buildClaudeLaunch, findClaudeEnvConflicts } from './runtime/claude.js';
+import {
+  buildClaudeLaunch,
+  findClaudeEnvConflicts,
+  findClaudeSettingsConflicts,
+} from './runtime/claude.js';
 import {
   buildCodexLaunch,
   loadCodexNativeModels,
@@ -695,8 +700,19 @@ function printEnvOverrideWarning(overridden) {
   console.error('        Run kenari status to see the active routing.');
 }
 
+function printClaudeSettingsWarning(conflicts) {
+  if (!conflicts.length) return;
+  const named = conflicts.length > 1
+    ? `${conflicts.slice(0, -1).join(', ')} and ${conflicts[conflicts.length - 1]}`
+    : conflicts[0];
+  console.error(`kenari: warning: ignoring ${named}`);
+  console.error('        from Claude settings; this session routes through kenari.');
+  console.error('        Run kenari status to see the active routing.');
+}
+
 function printClaudeEnvOverrides(env) {
   printEnvOverrideWarning(findClaudeEnvConflicts(env || process.env));
+  printClaudeSettingsWarning(findClaudeSettingsConflicts(readJson(claudeSettingsPath())));
 }
 
 function printGrokEnvOverrides(env) {
@@ -768,6 +784,7 @@ async function runTool(tool, args) {
         ),
         injectTools: tool === 'grok' ? ['kenari:web_search'] : null,
         kenariCatalog: tool === 'grok' && grokRoutesEverySlot(toolConfig.roles),
+        claudeRoles: tool === 'claude' ? toolConfig.roles : null,
         // Diagnostic, never load bearing: a failed write must not disturb the session,
         // and nothing is printed because the tool owns the terminal from here.
         onEffort: (record) => { recordEffort(record).catch(() => {}); },

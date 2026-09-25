@@ -5,6 +5,7 @@ import { fork } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { KenariError } from './store.js';
 import { validateGatewayUrl } from './gateway.js';
+import { remapClaudeModel } from './runtime/claude.js';
 
 const REQUEST_STRIP = new Set([
   'host', 'connection', 'content-length', 'transfer-encoding', 'accept-encoding',
@@ -66,9 +67,16 @@ function modelMap(catalog) {
   return new Map((catalog?.models || []).map((model) => [model.id, model]));
 }
 
+function requestPathOnly(url) {
+  return String(url || '/').split('?')[0];
+}
+
 function modelsListPath(url) {
-  const pathOnly = String(url || '/').split('?')[0];
-  return /\/models\/?$/.test(pathOnly);
+  return /\/models\/?$/.test(requestPathOnly(url));
+}
+
+function isHelloPath(url) {
+  return requestPathOnly(url) === '/api/hello';
 }
 
 function prefixKenariCatalog(raw) {
@@ -148,6 +156,14 @@ async function startRouterServer(options) {
   }
 
   const server = http.createServer(async (req, res) => {
+    const requestPath = req.url?.startsWith('/') ? req.url : `/${req.url || ''}`;
+    // Warmup probe. Claude Code HEAD/GETs this before inference and may omit the
+    // capability header; answering here keeps a stand-in session from 401ing on boot.
+    if (isHelloPath(requestPath) && (req.method === 'HEAD' || req.method === 'GET')) {
+      res.writeHead(200);
+      res.end();
+      return;
+    }
     if (capabilityToken && req.headers['x-kenari-capability'] !== capabilityToken) {
       replyJson(res, 403, 'invalid router capability');
       return;
@@ -166,10 +182,13 @@ async function startRouterServer(options) {
       return;
     }
 
-    const requestPath = req.url?.startsWith('/') ? req.url : `/${req.url || ''}`;
     const catalogList = Boolean(options.kenariCatalog)
       && req.method === 'GET'
       && modelsListPath(requestPath);
+    if (!catalogList && body && typeof body.model === 'string' && options.claudeRoles) {
+      const remapped = remapClaudeModel(body.model, req.headers, options.claudeRoles);
+      if (remapped !== body.model) body = { ...body, model: remapped };
+    }
     const selected = catalogList ? '' : (typeof body?.model === 'string' ? body.model : '');
     const isKenari = catalogList || selected.startsWith('kenari/');
     const id = catalogList
@@ -372,6 +391,7 @@ export async function startRouter(options) {
         effortPins: options.effortPins || null,
         injectTools: options.injectTools || null,
         kenariCatalog: Boolean(options.kenariCatalog),
+        claudeRoles: options.claudeRoles || null,
         debug: typeof options.debug === 'function',
         onEffort: typeof options.onEffort === 'function',
       },
