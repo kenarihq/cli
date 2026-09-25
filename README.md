@@ -146,8 +146,29 @@ kenari configure grok \
   --yes
 ```
 
-Unprefixed model IDs always route to the native provider. `kenari/` model IDs
-always route to Kenari. Routing never falls back between providers.
+`kenari/` model IDs always route to Kenari. Routing never falls back between
+providers.
+
+For Codex and Grok, an unprefixed ID always stays native.
+
+For Claude Code, an unprefixed **main-turn** ID stays native. Bare aliases
+(`opus`, `sonnet`, `haiku`, `fable`, `best`, `opusplan`) and hinted side
+requests (compaction, auxiliary, subagent, workflow) follow the matching
+Kenari-fixed slot. When every Claude slot is Kenari-fixed, leftover built-in
+IDs remap too: that session has no Anthropic credential that would work.
+
+`kenari claude --bare` (or `CLAUDE_CODE_SIMPLE=1`) uses a stand-in
+`ANTHROPIC_API_KEY` for all-Kenari sessions. Interactive all-Kenari still uses
+a stand-in `ANTHROPIC_AUTH_TOKEN`. Neither is the Kenari key.
+
+Kenari does not turn on Claude Code gateway model discovery. Discovery keeps
+IDs only if they contain `claude` or `anthropic`, so `kenari/glm-5-2` would be
+dropped. `/model` can still write a native ID into Claude settings; that pin
+then applies to later bare `claude` runs.
+
+If `~/.claude/settings.json` still holds `ANTHROPIC_BASE_URL`,
+`ANTHROPIC_AUTH_TOKEN`, `ANTHROPIC_API_KEY`, or `apiKeyHelper`, `kenari claude`
+warns and ignores those values for the session. It does not edit the file.
 
 ### Reasoning effort per slot
 

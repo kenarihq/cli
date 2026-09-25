@@ -536,3 +536,130 @@ test('router prefixes Kenari catalog ids when kenariCatalog is set', async (t) =
     data: [{ id: 'kenari/glm-5-2' }, { id: 'kenari/already' }],
   });
 });
+
+test('Claude warmup HEAD and GET /api/hello are 200 and never leave the router', async (t) => {
+  let upstreamHits = 0;
+  const bounce = await upstream(t, (_req, res) => {
+    upstreamHits += 1;
+    res.writeHead(500);
+    res.end('should-not-run');
+  });
+  const router = await startRouter({
+    nativeBase: bounce,
+    kenariBase: bounce,
+    credential: 'kn-secret',
+    catalog: { models: [] },
+    capabilityToken: 'cap-hello',
+  });
+  t.after(() => router.close());
+
+  const head = await fetch(router.url + '/api/hello', { method: 'HEAD' });
+  assert.equal(head.status, 200);
+  const get = await fetch(router.url + '/api/hello');
+  assert.equal(get.status, 200);
+  assert.equal(upstreamHits, 0);
+
+  const blocked = await fetch(router.url + '/v1/messages', {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ model: 'claude-sonnet-4-6' }),
+  });
+  assert.equal(blocked.status, 403);
+});
+
+test('Claude remap matrix: hint-aware mixed routing and all-Kenari leftovers', async (t) => {
+  const mixed = {
+    main: { mode: 'native' },
+    opus: { mode: 'native' },
+    sonnet: { mode: 'fixed', model: 'kenari/sonnet-model' },
+    haiku: { mode: 'native' },
+    fable: { mode: 'native' },
+    subagents: { mode: 'native' },
+  };
+  const allKenari = Object.fromEntries(
+    Object.keys(mixed).map((role) => [role, { mode: 'fixed', model: 'kenari/all-model' }]),
+  );
+  const cells = [
+    {
+      label: 'mixed main-class full id stays native',
+      roles: mixed,
+      model: 'claude-sonnet-4-6',
+      headers: { 'x-claude-code-request-class': 'main' },
+      route: 'native',
+      sent: 'claude-sonnet-4-6',
+    },
+    {
+      label: 'mixed auxiliary full id remaps to the sonnet slot',
+      roles: mixed,
+      model: 'claude-sonnet-4-6',
+      headers: { 'x-claude-code-request-class': 'auxiliary' },
+      route: 'kenari',
+      sent: 'sonnet-model',
+    },
+    {
+      label: 'all-Kenari remaps a leftover built-in id without hints',
+      roles: allKenari,
+      model: 'claude-haiku-4-5',
+      headers: {},
+      route: 'kenari',
+      sent: 'all-model',
+    },
+  ];
+  for (const cell of cells) {
+    const seen = [];
+    const nativeBase = await upstream(t, async (req, res) => {
+      seen.push({ route: 'native', body: await collect(req) });
+      res.end('{}');
+    });
+    const kenariBase = await upstream(t, async (req, res) => {
+      seen.push({ route: 'kenari', body: await collect(req) });
+      res.end('{}');
+    });
+    const router = await startRouter({
+      nativeBase,
+      kenariBase,
+      credential: 'kn-secret',
+      catalog: { models: [{ id: 'sonnet-model' }, { id: 'all-model' }] },
+      claudeRoles: cell.roles,
+    });
+    const response = await fetch(router.url + '/v1/messages', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', ...cell.headers },
+      body: JSON.stringify({ model: cell.model }),
+    });
+    await router.close();
+    assert.equal(response.status, 200, cell.label);
+    assert.equal(seen.length, 1, cell.label);
+    assert.equal(seen[0].route, cell.route, cell.label);
+    assert.equal(seen[0].body.model, cell.sent, cell.label);
+  }
+});
+
+test('Claude GET /v1/models stays on the native proxy when kenariCatalog is off', async (t) => {
+  const kenariBase = await upstream(t, (_req, res) => {
+    res.writeHead(500);
+    res.end('should-not-run');
+  });
+  const nativeBase = await upstream(t, (_req, res) => {
+    res.setHeader('content-type', 'application/json');
+    res.end(JSON.stringify({ data: [{ id: 'claude-sonnet-4-6' }] }));
+  });
+  const router = await startRouter({
+    nativeBase,
+    kenariBase,
+    credential: 'kn-secret',
+    catalog: { models: [{ id: 'glm-5-2' }] },
+    claudeRoles: {
+      main: { mode: 'fixed', model: 'kenari/glm-5-2' },
+      opus: { mode: 'fixed', model: 'kenari/glm-5-2' },
+      sonnet: { mode: 'fixed', model: 'kenari/glm-5-2' },
+      haiku: { mode: 'fixed', model: 'kenari/glm-5-2' },
+      fable: { mode: 'fixed', model: 'kenari/glm-5-2' },
+      subagents: { mode: 'fixed', model: 'kenari/glm-5-2' },
+    },
+  });
+  t.after(() => router.close());
+  const response = await fetch(router.url + '/v1/models');
+  assert.equal(response.status, 200);
+  assert.deepEqual(await response.json(), { data: [{ id: 'claude-sonnet-4-6' }] });
+});

@@ -747,6 +747,40 @@ test('the documented manual environment is reported and taken over, not fatal', 
   }
 });
 
+test('Claude settings env and apiKeyHelper are reported and left untouched', async () => {
+  process.env.KENARI_BASE_URL = await stubCatalog([
+    { id: 'narrow', pricing: {}, reasoning_options: ['low', 'medium', 'high', 'xhigh', 'max'] },
+  ]);
+  process.env.KENARI_ALLOW_HTTP = '1';
+  const { setKey } = await import('../src/store.js');
+  setKey('kn-testkey123');
+  const bin = path.join(home, 'bin-settings-env');
+  writeFakeTool(bin, 'claude');
+  const settingsDir = process.env.CLAUDE_CONFIG_DIR;
+  fs.mkdirSync(settingsDir, { recursive: true });
+  const settingsPath = path.join(settingsDir, 'settings.json');
+  fs.writeFileSync(settingsPath, JSON.stringify({
+    env: { ANTHROPIC_API_KEY: 'sk-settings' },
+    apiKeyHelper: '/bin/get-key',
+  }));
+  const oldPath = process.env.PATH;
+  process.env.PATH = `${bin}${path.delimiter}${oldPath || ''}`;
+  try {
+    assert.equal(await run(
+      'configure', 'claude',
+      '--main', 'native', '--opus', 'native', '--sonnet', 'kenari/narrow',
+      '--haiku', 'native', '--fable', 'native', '--subagents', 'native', '--yes',
+    ), 0);
+    output = []; stdout = []; stderr = [];
+    assert.equal(await run('claude', '--version'), 0);
+    assert.match(stderrLogs(), /ignoring settings\.env\.ANTHROPIC_API_KEY and settings\.apiKeyHelper/);
+    assert.match(stderrLogs(), /from Claude settings/);
+    assert.equal(JSON.parse(fs.readFileSync(settingsPath, 'utf8')).apiKeyHelper, '/bin/get-key');
+  } finally {
+    process.env.PATH = oldPath;
+  }
+});
+
 test('configure pins effort per slot and refuses it on a native slot', async () => {
   process.env.KENARI_BASE_URL = await stubCatalog(CATALOG);
   process.env.KENARI_ALLOW_HTTP = '1';

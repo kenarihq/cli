@@ -4,7 +4,13 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import http from 'node:http';
-import { buildClaudeLaunch, claudeRoutesEverySlot, findClaudeEnvConflicts } from '../src/runtime/claude.js';
+import {
+  buildClaudeLaunch,
+  claudeRoutesEverySlot,
+  findClaudeEnvConflicts,
+  findClaudeSettingsConflicts,
+  remapClaudeModel,
+} from '../src/runtime/claude.js';
 import {
   CODEX_API_BASE_URL,
   CODEX_CHATGPT_BASE_URL,
@@ -114,6 +120,11 @@ test('Claude launch layers only fixed roles and removes credential environment',
   assert.equal(built.env.ANTHROPIC_DEFAULT_OPUS_MODEL, 'kenari/gpt-5');
   assert.equal(built.env.ANTHROPIC_DEFAULT_SONNET_MODEL, 'user-sonnet');
   assert.equal(built.env.CLAUDE_CODE_SUBAGENT_MODEL, 'kenari/glm-5');
+  assert.equal(built.env.CLAUDE_CODE_SUBAGENT_MODEL_FORCE, 'kenari/glm-5');
+  assert.equal(built.env.CLAUDE_CODE_NO_MODEL_FALLBACK, '1');
+  assert.equal(built.env.CLAUDE_CODE_GATEWAY_HINT_HEADERS, '1');
+  assert.equal(built.env.ANTHROPIC_DEFAULT_OPUS_MODEL_NAME, 'gpt-5');
+  assert.equal(built.env.ANTHROPIC_DEFAULT_OPUS_MODEL_DESCRIPTION, 'Kenari gpt-5');
   assert.throws(() => buildClaudeLaunch({
     toolConfig: { roles: claudeRoles },
     routerUrl: 'http://127.0.0.1:1',
@@ -199,6 +210,100 @@ test('claudeRoutesEverySlot needs every slot, not just one', () => {
 test('Claude launch reports no override for an empty variable', () => {
   assert.deepEqual(findClaudeEnvConflicts({ ANTHROPIC_BASE_URL: '', PATH: '/bin' }), []);
 });
+
+test('Claude launch sets FORCE and fallback only for the slots that need them', () => {
+  const native = buildClaudeLaunch({
+    toolConfig: { roles: ALL_NATIVE },
+    routerUrl: 'http://127.0.0.1:3',
+    env: { PATH: '/bin', CLAUDE_CODE_SUBAGENT_MODEL_FORCE: 'leftover' },
+  });
+  assert.equal(native.env.CLAUDE_CODE_GATEWAY_HINT_HEADERS, '1');
+  assert.equal(native.env.CLAUDE_CODE_NO_MODEL_FALLBACK, undefined);
+  assert.equal(native.env.CLAUDE_CODE_SUBAGENT_MODEL_FORCE, undefined);
+  assert.equal(native.env.CLAUDE_CODE_SKIP_FAST_MODE_NETWORK_ERRORS, undefined);
+
+  const mixed = buildClaudeLaunch({
+    toolConfig: { roles: { ...ALL_NATIVE, sonnet: { mode: 'fixed', model: 'kenari/glm-5-2' } } },
+    routerUrl: 'http://127.0.0.1:3',
+    env: { PATH: '/bin' },
+  });
+  assert.equal(mixed.env.CLAUDE_CODE_NO_MODEL_FALLBACK, '1');
+  assert.equal(mixed.env.CLAUDE_CODE_SUBAGENT_MODEL_FORCE, undefined);
+  assert.equal(mixed.env.ANTHROPIC_DEFAULT_SONNET_MODEL_NAME, 'glm-5-2');
+  assert.equal(mixed.env.ANTHROPIC_DEFAULT_SONNET_MODEL_DESCRIPTION, 'Kenari glm-5-2');
+});
+
+test('Claude all-Kenari stand-in uses AUTH_TOKEN interactively and API_KEY for --bare', () => {
+  const interactive = buildClaudeLaunch({
+    toolConfig: { roles: ALL_FIXED },
+    routerUrl: 'http://127.0.0.1:9',
+    standInCredential: 'stand-in-token',
+    env: { PATH: '/bin' },
+  });
+  assert.equal(interactive.env.ANTHROPIC_AUTH_TOKEN, 'stand-in-token');
+  assert.equal(interactive.env.ANTHROPIC_API_KEY, undefined);
+  assert.equal(interactive.env.CLAUDE_CODE_SKIP_FAST_MODE_NETWORK_ERRORS, '1');
+
+  const bare = buildClaudeLaunch({
+    toolConfig: { roles: ALL_FIXED },
+    routerUrl: 'http://127.0.0.1:9',
+    standInCredential: 'stand-in-token',
+    args: ['--bare', '-p', 'hello'],
+    env: { PATH: '/bin' },
+  });
+  assert.equal(bare.env.ANTHROPIC_API_KEY, 'stand-in-token');
+  assert.equal(bare.env.ANTHROPIC_AUTH_TOKEN, undefined);
+
+  const simple = buildClaudeLaunch({
+    toolConfig: { roles: ALL_FIXED },
+    routerUrl: 'http://127.0.0.1:9',
+    standInCredential: 'stand-in-token',
+    env: { PATH: '/bin', CLAUDE_CODE_SIMPLE: '1' },
+  });
+  assert.equal(simple.env.ANTHROPIC_API_KEY, 'stand-in-token');
+  assert.equal(simple.env.ANTHROPIC_AUTH_TOKEN, undefined);
+});
+
+test('Claude settings conflicts name env keys and apiKeyHelper', () => {
+  assert.deepEqual(findClaudeSettingsConflicts(null), []);
+  assert.deepEqual(findClaudeSettingsConflicts({
+    env: { ANTHROPIC_BASE_URL: 'https://kenari.id', ANTHROPIC_AUTH_TOKEN: 'kn' },
+    apiKeyHelper: '/bin/get-key',
+  }), [
+    'settings.env.ANTHROPIC_BASE_URL',
+    'settings.env.ANTHROPIC_AUTH_TOKEN',
+    'settings.apiKeyHelper',
+  ]);
+  assert.deepEqual(findClaudeSettingsConflicts({ env: { ANTHROPIC_BASE_URL: '' } }), []);
+});
+
+const REMAP_ROLES = {
+  main: { mode: 'fixed', model: 'kenari/main-model' },
+  opus: { mode: 'fixed', model: 'kenari/opus-model' },
+  sonnet: { mode: 'fixed', model: 'kenari/sonnet-model' },
+  haiku: { mode: 'native' },
+  fable: { mode: 'fixed', model: 'kenari/fable-model' },
+  subagents: { mode: 'native' },
+};
+
+for (const [label, model, headers, roles, expected] of [
+  ['kenari prefix is already routed', 'kenari/glm-5-2', {}, REMAP_ROLES, 'kenari/glm-5-2'],
+  ['mixed main-class full id stays native', 'claude-sonnet-4-6', { 'x-claude-code-request-class': 'main' }, REMAP_ROLES, 'claude-sonnet-4-6'],
+  ['mixed auxiliary full id remaps when family is fixed', 'claude-sonnet-4-6', { 'x-claude-code-request-class': 'auxiliary' }, REMAP_ROLES, 'kenari/sonnet-model'],
+  ['mixed bare alias remaps when family is fixed', 'sonnet', {}, REMAP_ROLES, 'kenari/sonnet-model'],
+  ['mixed alias with 1m suffix remaps', 'sonnet[1m]', {}, REMAP_ROLES, 'kenari/sonnet-model'],
+  ['mixed native family stays native even as auxiliary', 'claude-haiku-4-5', { 'x-claude-code-request-class': 'auxiliary' }, REMAP_ROLES, 'claude-haiku-4-5'],
+  ['mixed best prefers fable when fable is fixed', 'best', {}, REMAP_ROLES, 'kenari/fable-model'],
+  ['mixed opusplan without hints uses opus', 'opusplan', {}, REMAP_ROLES, 'kenari/opus-model'],
+  ['mixed opusplan Plan agent uses opus', 'opusplan', { 'x-claude-code-agent-type': 'Plan' }, REMAP_ROLES, 'kenari/opus-model'],
+  ['mixed opusplan execution uses sonnet', 'opusplan', { 'x-claude-code-request-class': 'main' }, REMAP_ROLES, 'kenari/sonnet-model'],
+  ['all-Kenari remaps a leftover built-in id without hints', 'claude-haiku-4-5', {}, ALL_FIXED, 'kenari/a'],
+  ['all-Kenari remaps an unrecognized id to main', 'mystery-model', {}, ALL_FIXED, 'kenari/a'],
+]) {
+  test(`Claude remap: ${label}`, () => {
+    assert.equal(remapClaudeModel(model, headers, roles), expected);
+  });
+}
 
 test('Codex launch injects temporary controls before original args', () => {
   const built = buildCodexLaunch({
