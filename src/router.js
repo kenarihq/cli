@@ -2,6 +2,7 @@
 import http from 'node:http';
 import https from 'node:https';
 import { fork } from 'node:child_process';
+import { performance } from 'node:perf_hooks';
 import { fileURLToPath } from 'node:url';
 import { KenariError } from './store.js';
 import { validateGatewayUrl } from './gateway.js';
@@ -140,15 +141,24 @@ export function describeUpstreamError(error, { kenari, hostname }) {
     .replace(/;/g, ',');
 }
 
+// A pooled socket the server closed fails within one round trip of the write. A reset that
+// comes later means the upstream had the whole call and was working on it, and a second
+// call would be billed twice.
+export const STALE_RETRY_WINDOW_MS = 1000;
+
 // Node keeps connections alive since 19, and Cloudflare closes idle ones. A request that
 // goes out on a pooled socket in the moment it closes fails with ECONNRESET before any
 // byte of a response, and sending it once more on a new connection is the pattern the
 // Node http docs give. It is the only failure repeated. A reset on a fresh socket is a
-// real one. Once a response has started the upstream has done the work. A second failure
-// ends it, so a call is sent at most twice. A client that has gone is not worth a second
-// billed call.
-export function shouldRetryUpstream({ reusedSocket, code, received, retried, clientGone }) {
-  return reusedSocket === true && code === 'ECONNRESET' && !received && !retried && !clientGone;
+// real one, and so is one that took longer than the window above to arrive. Once a
+// response has started the upstream has done the work. A second failure ends it, so a
+// call is sent at most twice. A client that has gone is not worth a second billed call.
+// elapsedMs is the time from handing the call over to the error. Without a number, no retry.
+export function shouldRetryUpstream({
+  reusedSocket, code, received, retried, clientGone, elapsedMs,
+}) {
+  return reusedSocket === true && code === 'ECONNRESET' && !received && !retried && !clientGone
+    && Number.isFinite(elapsedMs) && elapsedMs <= STALE_RETRY_WINDOW_MS;
 }
 
 async function startRouterServer(options) {
@@ -327,42 +337,65 @@ async function startRouterServer(options) {
         if (!res.writableEnded) upstreamRes.destroy();
       });
     };
+    // Answers the client when the call to the upstream failed. A client that has gone has
+    // nobody to tell, and one that already has headers can only be cut off.
+    const failUpstream = (error, detail = '') => {
+      debugLine(`upstream-error route=${route} host=${target.hostname} cause=${upstreamCause(error)} retried=${retried}${detail}`);
+      if (res.destroyed) return;
+      if (!res.headersSent) {
+        replyJson(res, 502, describeUpstreamError(error, { kenari: isKenari, hostname: target.hostname }));
+      } else {
+        res.destroy(error);
+      }
+    };
     const sendUpstream = () => {
-      const attempt = transport.request({
-        protocol: target.protocol,
-        hostname: target.hostname,
-        port: target.port || undefined,
-        method: req.method,
-        path: basePath + requestPath,
-        headers,
-      }, onResponse);
+      let attempt;
+      try {
+        attempt = transport.request({
+          protocol: target.protocol,
+          hostname: target.hostname,
+          port: target.port || undefined,
+          method: req.method,
+          path: basePath + requestPath,
+          headers,
+        }, onResponse);
+      } catch (error) {
+        // Thrown before anything is sent, for a header value Node refuses for one. Left
+        // alone it ends the whole router and every later call of the session with it.
+        failUpstream(error);
+        return;
+      }
       upstream = attempt;
+      const sentAt = performance.now();
       attempt.on('error', (error) => {
         if (attempt !== upstream) return;
-        const cause = upstreamCause(error);
+        const elapsedMs = performance.now() - sentAt;
+        const after = `after=${Math.round(elapsedMs)}ms`;
         if (shouldRetryUpstream({
           reusedSocket: attempt.reusedSocket,
           code: error?.code,
           received,
           retried,
           clientGone: clientAborted || res.destroyed,
+          elapsedMs,
         })) {
           retried = true;
-          debugLine(`upstream-retry route=${route} host=${target.hostname} cause=${cause}`);
+          debugLine(`upstream-retry route=${route} host=${target.hostname} cause=${upstreamCause(error)} ${after}`);
           sendUpstream();
           return;
         }
-        debugLine(`upstream-error route=${route} host=${target.hostname} cause=${cause} retried=${retried}`);
-        if (!res.headersSent) {
-          replyJson(res, 502, describeUpstreamError(error, { kenari: isKenari, hostname: target.hostname }));
-        } else {
-          res.destroy(error);
-        }
+        failUpstream(error, ` reused=${attempt.reusedSocket === true} ${after}`);
       });
       attempt.end(payload);
     };
-    req.on('aborted', () => {
+    // The client left before the response was whole. Nobody will read the answer, so the
+    // call it waits on is cancelled instead of billed. This replaces a listener on the
+    // request's 'aborted', which only fires before the body is read and so never ran. A
+    // response that ended is a normal completion, and then there is nothing to cancel.
+    res.on('close', () => {
+      if (res.writableEnded) return;
       clientAborted = true;
+      debugLine(`upstream-cancel route=${route} host=${target.hostname}`);
       upstream?.destroy();
     });
     sendUpstream();

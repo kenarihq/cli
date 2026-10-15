@@ -1,8 +1,10 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import http from 'node:http';
-import { isDeepStrictEqual } from 'node:util';
-import { describeUpstreamError, shouldRetryUpstream, startRouter } from '../src/router.js';
+import { inspect, isDeepStrictEqual } from 'node:util';
+import {
+  describeUpstreamError, shouldRetryUpstream, startRouter, STALE_RETRY_WINDOW_MS,
+} from '../src/router.js';
 
 const originalAllowHttp = process.env.KENARI_ALLOW_HTTP;
 test.before(() => { process.env.KENARI_ALLOW_HTTP = '1'; });
@@ -134,7 +136,10 @@ test('router 502 names the cause and the host when the upstream refuses the conn
   // The debug hook crosses the fork IPC, so wait for the line instead of racing it.
   await until(() => lines.some((line) => line.startsWith('upstream-error')));
   const line = lines.find((entry) => entry.startsWith('upstream-error'));
-  assert.equal(line, 'upstream-error route=kenari host=127.0.0.1 cause=ECONNREFUSED retried=false');
+  assert.match(
+    line,
+    /^upstream-error route=kenari host=127\.0\.0\.1 cause=ECONNREFUSED retried=false reused=false after=\d+ms$/,
+  );
   for (const secret of SECRETS) {
     assert.ok(!line.toLowerCase().includes(secret.toLowerCase()), `leaked ${secret} into the log`);
   }
@@ -183,28 +188,74 @@ test('describeUpstreamError falls back to a trimmed one line message, never a se
   assert.match(describeUpstreamError(undefined, { kenari: false, hostname: 'x.test' }), /^native upstream error \(unknown error /);
 });
 
+test('router answers 502 and stays up when the call cannot be built', async (t) => {
+  // A credential with a character Node refuses in a header makes http.request throw before
+  // anything is sent. Left alone that ended the router, and every later call of the session.
+  const { base, arrivals } = await trackedUpstream(t, ({ res, arrival }) => serve(res, arrival.marker));
+  const lines = [];
+  const router = await routerTo(t, base, {
+    credential: 'kn-broken\ncredential',
+    debug: (line) => lines.push(line),
+  });
+
+  const response = await ask(router, 'unbuildable');
+  assert.equal(response.status, 502);
+  const { error } = await response.json();
+  assert.equal(
+    error.message,
+    'Kenari upstream error (ERR_INVALID_CHAR connecting to 127.0.0.1). '
+      + 'Check your internet connection, VPN or proxy, then try again.',
+  );
+  for (const secret of ['kn-broken', 'Bearer']) {
+    assert.ok(!error.message.includes(secret), `leaked ${secret}`);
+  }
+
+  // The router is still there. The native route sends no credential.
+  const native = await ask(router, 'native', { model: 'claude-opus-5' });
+  assert.equal(native.status, 200);
+  assert.deepEqual(await native.json(), { ok: true, marker: 'native' });
+  assert.deepEqual(summary(arrivals), [['native', false, 'served']]);
+
+  await until(() => lines.some((line) => line.startsWith('upstream-error')));
+  assert.equal(
+    lines.find((line) => line.startsWith('upstream-error')),
+    'upstream-error route=kenari host=127.0.0.1 cause=ERR_INVALID_CHAR retried=false',
+  );
+});
+
 // The one retry
 
-test('shouldRetryUpstream: only a pooled socket reset before any response, first try, client present', () => {
+test('shouldRetryUpstream: only a pooled socket reset quickly, before any response, first try, client present', () => {
   const retrying = {
-    reusedSocket: true, code: 'ECONNRESET', received: false, retried: false, clientGone: false,
+    reusedSocket: true, code: 'ECONNRESET', received: false, retried: false, clientGone: false, elapsedMs: 5,
   };
   assert.equal(shouldRetryUpstream(retrying), true);
+  // Pinned: this number decides when a second billed call is possible.
+  assert.equal(STALE_RETRY_WINDOW_MS, 1000);
+  // Inside the window, its edge included, it is a stale pooled socket. Past it, or with no
+  // usable number, the upstream may have been working on the call and it is not sent again.
+  const inside = [0, 5, 250, STALE_RETRY_WINDOW_MS];
+  const outside = [STALE_RETRY_WINDOW_MS + 1, 1500, Number.POSITIVE_INFINITY, Number.NaN, undefined, null];
+  const withoutTime = ({ elapsedMs, ...others }) => others;
   let cells = 0;
   for (const reusedSocket of [true, false, undefined]) {
     for (const code of ['ECONNRESET', 'ECONNREFUSED', 'ETIMEDOUT', undefined]) {
       for (const received of [true, false]) {
         for (const retried of [true, false]) {
           for (const clientGone of [true, false]) {
-            const cell = { reusedSocket, code, received, retried, clientGone };
-            cells += 1;
-            assert.equal(shouldRetryUpstream(cell), isDeepStrictEqual(cell, retrying), JSON.stringify(cell));
+            for (const elapsedMs of [...inside, ...outside]) {
+              const cell = { reusedSocket, code, received, retried, clientGone, elapsedMs };
+              const expected = isDeepStrictEqual(withoutTime(cell), withoutTime(retrying))
+                && inside.includes(elapsedMs);
+              cells += 1;
+              assert.equal(shouldRetryUpstream(cell), expected, inspect(cell));
+            }
           }
         }
       }
     }
   }
-  assert.equal(cells, 96);
+  assert.equal(cells, 3 * 4 * 2 * 2 * 2 * 10);
 });
 
 test('router sends a request once more on a new connection when a pooled socket was closed on it', { skip: needsPool }, async (t) => {
@@ -241,9 +292,9 @@ test('router sends a request once more on a new connection when a pooled socket 
   assert.equal(resent.headers['content-length'], String(resent.raw.length));
 
   await until(() => lines.some((line) => line.startsWith('upstream-retry')));
-  assert.equal(
+  assert.match(
     lines.find((line) => line.startsWith('upstream-retry')),
-    'upstream-retry route=kenari host=127.0.0.1 cause=ECONNRESET',
+    /^upstream-retry route=kenari host=127\.0\.0\.1 cause=ECONNRESET after=\d+ms$/,
   );
   assert.ok(!lines.some((line) => line.startsWith('upstream-error')));
 });
@@ -270,6 +321,12 @@ test('router gives up when the one retry is reset too, so a call is never sent t
       drop(req, arrival);
       return;
     }
+    // A third call that reaches a new connection is answered, so a router that sent it a
+    // third time fails the status check below instead of hanging.
+    if (arrival.marker === 'third') {
+      serve(res, arrival.marker);
+      return;
+    }
     held.push({ res, marker: arrival.marker });
     if (held.length === 2) for (const { res: waiting, marker } of held) serve(waiting, marker);
   });
@@ -293,9 +350,50 @@ test('router gives up when the one retry is reset too, so a call is never sent t
   assert.equal(arrivals.length, 4);
 });
 
+test('router does not send a call again when the pooled socket dies long after the upstream had it', { skip: needsPool }, async (t) => {
+  // The upstream got the whole call, worked on it past the window and dropped the connection
+  // before any response byte. A stale pooled socket fails within a round trip of the write.
+  // This one did not, so the call may be billed already and a second one would be billed again.
+  const lines = [];
+  const { base, arrivals } = await trackedUpstream(t, ({ req, res, arrival }) => {
+    if (arrival.marker === 'first') {
+      serve(res, arrival.marker);
+      return;
+    }
+    setTimeout(() => drop(req, arrival), STALE_RETRY_WINDOW_MS + 500);
+  });
+  const router = await routerTo(t, base, { debug: (line) => lines.push(line) });
+
+  const first = await ask(router, 'first');
+  await first.json();
+  const second = await ask(router, 'second');
+  assert.equal(second.status, 502);
+  const { error } = await second.json();
+  assert.match(error.message, /^Kenari upstream error \(ECONNRESET connecting to 127\.0\.0\.1\)\. /);
+  await quiet();
+  assert.deepEqual(summary(arrivals), [
+    ['first', false, 'served'],
+    ['second', true, 'dropped'],
+  ]);
+
+  // The router saw a reset on a reused socket with nothing else against a retry but the time.
+  await until(() => lines.some((line) => line.startsWith('upstream-error')));
+  const line = lines.find((entry) => entry.startsWith('upstream-error'));
+  assert.match(
+    line,
+    /^upstream-error route=kenari host=127\.0\.0\.1 cause=ECONNRESET retried=false reused=true after=\d+ms$/,
+  );
+  assert.ok(Number(line.match(/after=(\d+)ms/)[1]) > STALE_RETRY_WINDOW_MS, line);
+  assert.ok(!lines.some((entry) => entry.startsWith('upstream-retry')));
+});
+
 test('router does not send a call again once the upstream began to answer it', { skip: needsPool }, async (t) => {
-  // Headers and a first chunk reach the router, then the connection is reset. The same
-  // error code as a stale socket, but the upstream has started work, so it is not repeated.
+  // Headers and a first chunk reach the router, then the connection is reset with an RST.
+  // On a pooled socket that is the same ECONNRESET a stale socket gives, and it reaches the
+  // request as an error as well as the response. A plain close would only reach the response
+  // and never come near the retry. The upstream has started work on the call, so it is not
+  // repeated. The log line proves the error did reach the request and was turned down.
+  const lines = [];
   const { base, arrivals } = await trackedUpstream(t, ({ req, res, arrival }) => {
     if (arrival.marker === 'first') {
       serve(res, arrival.marker);
@@ -304,10 +402,10 @@ test('router does not send a call again once the upstream began to answer it', {
     arrival.outcome = 'reset after the first chunk';
     res.writeHead(200, { 'content-type': 'text/event-stream' });
     res.write('data: partial\n\n', () => {
-      setTimeout(() => (req.socket.resetAndDestroy || req.socket.destroy).call(req.socket), 50);
+      setTimeout(() => (req.socket.resetAndDestroy || req.socket.destroy).call(req.socket), 100);
     });
   });
-  const router = await routerTo(t, base);
+  const router = await routerTo(t, base, { debug: (line) => lines.push(line) });
 
   const first = await ask(router, 'first');
   assert.equal(first.status, 200);
@@ -320,6 +418,12 @@ test('router does not send a call again once the upstream began to answer it', {
     ['first', false, 'served'],
     ['second', true, 'reset after the first chunk'],
   ]);
+  await until(() => lines.some((line) => line.startsWith('upstream-error')));
+  assert.match(
+    lines.find((line) => line.startsWith('upstream-error')),
+    /^upstream-error route=kenari host=127\.0\.0\.1 cause=ECONNRESET retried=false reused=true after=\d+ms$/,
+  );
+  assert.ok(!lines.some((line) => line.startsWith('upstream-retry')));
 });
 
 test('router does not send a call again when a pooled socket fails with anything but a reset', { skip: needsPool }, async (t) => {
@@ -348,17 +452,49 @@ test('router does not send a call again when a pooled socket fails with anything
   ]);
 });
 
+// The client leaving
+
+test('router cancels the call when the client leaves before the upstream answered', async (t) => {
+  // The upstream never answers. When the client goes the router closes its side too, so the
+  // work is not left running for nobody and not billed to the end.
+  let upstreamClosed = false;
+  const lines = [];
+  const { base, arrivals } = await trackedUpstream(t, ({ req, arrival }) => {
+    arrival.outcome = 'held';
+    req.socket.once('close', () => { upstreamClosed = true; });
+  });
+  const router = await routerTo(t, base, { debug: (line) => lines.push(line) });
+
+  const controller = new AbortController();
+  const pending = ask(router, 'leaving', { signal: controller.signal }).catch((error) => error);
+  await until(() => arrivals.length === 1);
+  await quiet(100);
+  assert.equal(upstreamClosed, false, 'the call stays open while the client is there');
+  controller.abort();
+  assert.equal((await pending).name, 'AbortError');
+
+  await until(() => upstreamClosed);
+  await until(() => lines.some((line) => line.startsWith('upstream-cancel')));
+  assert.equal(
+    lines.find((line) => line.startsWith('upstream-cancel')),
+    'upstream-cancel route=kenari host=127.0.0.1',
+  );
+  await quiet();
+  assert.equal(arrivals.length, 1);
+});
+
 test('router does not send a call again for a client that has already gone', { skip: needsPool }, async (t) => {
-  // The pooled socket dies only after the client walked away. A second call would be
-  // billed and nobody would read it.
-  let held = null;
+  // Cancelling closes the pooled socket under the call. That surfaces as the same quick
+  // ECONNRESET a stale socket gives. Sent again, the call would be billed with nobody to
+  // read it.
+  let upstreamClosed = false;
   const { base, arrivals } = await trackedUpstream(t, ({ req, res, arrival }) => {
     if (arrival.marker === 'first') {
       serve(res, arrival.marker);
       return;
     }
-    arrival.outcome = 'held';
-    held = { req, arrival };
+    arrival.outcome = 'held then cancelled';
+    req.socket.once('close', () => { upstreamClosed = true; });
   });
   const router = await routerTo(t, base);
 
@@ -366,15 +502,30 @@ test('router does not send a call again for a client that has already gone', { s
   await first.json();
   const controller = new AbortController();
   const pending = ask(router, 'second', { signal: controller.signal }).catch((error) => error);
-  await until(() => held !== null);
+  await until(() => arrivals.length === 2);
   controller.abort();
   assert.equal((await pending).name, 'AbortError');
-  await quiet();
-  held.arrival.outcome = 'dropped';
-  held.req.socket.destroy();
+  await until(() => upstreamClosed);
   await quiet();
   assert.deepEqual(summary(arrivals), [
     ['first', false, 'served'],
-    ['second', true, 'dropped'],
+    ['second', true, 'held then cancelled'],
   ]);
+});
+
+test('router leaves a call alone when its response completed normally', async (t) => {
+  const lines = [];
+  const { base } = await trackedUpstream(t, ({ res }) => {
+    res.writeHead(200, { 'content-type': 'text/event-stream' });
+    res.write('data: one\n\n');
+    setTimeout(() => res.end('data: two\n\n'), 20);
+  });
+  const router = await routerTo(t, base, { debug: (line) => lines.push(line) });
+
+  const response = await ask(router, 'whole');
+  assert.equal(await response.text(), 'data: one\n\ndata: two\n\n');
+  await until(() => lines.length > 0);
+  await quiet();
+  // Only the routing line: no cancel, no error, no retry.
+  assert.deepEqual(lines, ['route=kenari model=glm-5-2']);
 });
