@@ -116,6 +116,41 @@ function compatibilityLimit(model, body, compatibility) {
   return desired;
 }
 
+const UPSTREAM_HINT = 'Check your internet connection, VPN or proxy, then try again.';
+const UPSTREAM_CAUSE_LIMIT = 120;
+
+// What failed, as one short token. The error code tells DNS (ENOTFOUND), refused
+// (ECONNREFUSED), reset (ECONNRESET), timeout (ETIMEDOUT) and TLS apart. Errors that
+// carry no code fall back to their message, trimmed so a long one cannot flood the line.
+function upstreamCause(error) {
+  const code = typeof error?.code === 'string' ? error.code : '';
+  const text = (code || String(error?.message ?? '')).replace(/\s+/g, ' ').trim();
+  if (text.length > UPSTREAM_CAUSE_LIMIT) return `${text.slice(0, UPSTREAM_CAUSE_LIMIT).trimEnd()}...`;
+  return text || 'unknown error';
+}
+
+// The body of the 502 when a call to the upstream fails. The wrapped tool shows it as the
+// API error, so it is the only diagnosis the customer ever sees: the cause says what
+// failed and the hostname says which side. Nothing from the request goes in, no header,
+// no credential and no body. Customer copy carries no semicolons, so none can get in
+// through the message of a library error either.
+export function describeUpstreamError(error, { kenari, hostname }) {
+  const label = kenari ? 'Kenari' : 'native';
+  return `${label} upstream error (${upstreamCause(error)} connecting to ${hostname}). ${UPSTREAM_HINT}`
+    .replace(/;/g, ',');
+}
+
+// Node keeps connections alive since 19, and Cloudflare closes idle ones. A request that
+// goes out on a pooled socket in the moment it closes fails with ECONNRESET before any
+// byte of a response, and sending it once more on a new connection is the pattern the
+// Node http docs give. It is the only failure repeated. A reset on a fresh socket is a
+// real one. Once a response has started the upstream has done the work. A second failure
+// ends it, so a call is sent at most twice. A client that has gone is not worth a second
+// billed call.
+export function shouldRetryUpstream({ reusedSocket, code, received, retried, clientGone }) {
+  return reusedSocket === true && code === 'ECONNRESET' && !received && !retried && !clientGone;
+}
+
 async function startRouterServer(options) {
   if (!options?.nativeBase || !options?.kenariBase) {
     throw new KenariError('router requires nativeBase and kenariBase');
@@ -132,6 +167,12 @@ async function startRouterServer(options) {
   // sonnet for the work and haiku for background tasks, so a single key would see every
   // alternation as a change and report on every request for the whole session.
   const lastEffort = new Map();
+
+  // Diagnostic only, so a hook that throws must never reach the request it describes.
+  function debugLine(line) {
+    if (!options.debug) return;
+    try { options.debug(line); } catch {}
+  }
 
   // Observe only. The gateway owns clamping and stripping and has a tested matrix for
   // it; a router that adjusted the level here would make this record a lie.
@@ -243,14 +284,16 @@ async function startRouterServer(options) {
     headers['content-length'] = String(payload.length);
     const basePath = target.pathname.replace(/\/$/, '');
     const transport = target.protocol === 'https:' ? https : http;
-    const upstream = transport.request({
-      protocol: target.protocol,
-      hostname: target.hostname,
-      port: target.port || undefined,
-      method: req.method,
-      path: basePath + requestPath,
-      headers,
-    }, (upstreamRes) => {
+    const route = isKenari ? 'kenari' : 'native';
+    // The call is built in one function so it can be issued twice. Once, and again if it
+    // fails the way a stale keep-alive socket fails (see shouldRetryUpstream). The payload
+    // is a buffer, so the second call is the same bytes as the first.
+    let upstream = null;
+    let received = false;
+    let retried = false;
+    let clientAborted = false;
+    const onResponse = (upstreamRes) => {
+      received = true;
       if (onEffort && isKenari && !catalogList) recordEffort(upstreamRes, body, id, pinned);
       const terminateDownstream = (error) => {
         if (!res.destroyed) res.destroy(error);
@@ -283,13 +326,46 @@ async function startRouterServer(options) {
       res.on('close', () => {
         if (!res.writableEnded) upstreamRes.destroy();
       });
+    };
+    const sendUpstream = () => {
+      const attempt = transport.request({
+        protocol: target.protocol,
+        hostname: target.hostname,
+        port: target.port || undefined,
+        method: req.method,
+        path: basePath + requestPath,
+        headers,
+      }, onResponse);
+      upstream = attempt;
+      attempt.on('error', (error) => {
+        if (attempt !== upstream) return;
+        const cause = upstreamCause(error);
+        if (shouldRetryUpstream({
+          reusedSocket: attempt.reusedSocket,
+          code: error?.code,
+          received,
+          retried,
+          clientGone: clientAborted || res.destroyed,
+        })) {
+          retried = true;
+          debugLine(`upstream-retry route=${route} host=${target.hostname} cause=${cause}`);
+          sendUpstream();
+          return;
+        }
+        debugLine(`upstream-error route=${route} host=${target.hostname} cause=${cause} retried=${retried}`);
+        if (!res.headersSent) {
+          replyJson(res, 502, describeUpstreamError(error, { kenari: isKenari, hostname: target.hostname }));
+        } else {
+          res.destroy(error);
+        }
+      });
+      attempt.end(payload);
+    };
+    req.on('aborted', () => {
+      clientAborted = true;
+      upstream?.destroy();
     });
-    upstream.on('error', (error) => {
-      if (!res.headersSent) replyJson(res, 502, `${isKenari ? 'Kenari' : 'native'} upstream error`);
-      else res.destroy(error);
-    });
-    req.on('aborted', () => upstream.destroy());
-    upstream.end(payload);
+    sendUpstream();
     if (options.debug) {
       const rewrite = raised === null ? '' : ` max_tokens=${body?.max_tokens ?? body?.max_output_tokens}->${raised}`;
       options.debug(`route=${isKenari ? 'kenari' : 'native'} model=${id}${rewrite}`);
