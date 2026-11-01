@@ -1,5 +1,8 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 import { spawnSync } from 'node:child_process';
+import { createHash } from 'node:crypto';
+import fs from 'node:fs';
+import path from 'node:path';
 import { KenariError } from '../store.js';
 import { spawnTarget } from '../supervisor.js';
 
@@ -146,9 +149,106 @@ export function buildCodexLaunch(options) {
   if (roles.subagents?.mode === 'fixed') {
     overrides.push(`agents.default_subagent_model=${tomlString(roles.subagents.model)}`);
   }
-  const args = [];
-  for (const value of overrides) args.push('-c', value);
-  args.push(...inputArgs);
+  const overrideArgs = [];
+  for (const value of overrides) overrideArgs.push('-c', value);
   const env = { ...(options.env || process.env) };
-  return { args, env };
+  const mode = options.codexDaemon ? codexDaemonMode(inputArgs) : 'unchanged';
+  if (mode === 'no-daemon') {
+    return { args: [...overrideArgs, '--no-daemon', ...inputArgs], env };
+  }
+  if (mode === 'private-app-server') {
+    const socketPath = path.join(options.privateDir(), 'app-server.sock');
+    const listen = `unix://${socketPath}`;
+    return {
+      args: [...overrideArgs, '--remote', listen, ...inputArgs],
+      env,
+      sidecar: {
+        args: [...overrideArgs, ...userConfigArgs(inputArgs), 'app-server', '--listen', listen],
+        socketPath,
+        leftovers: codexSocketLeftovers(socketPath),
+      },
+    };
+  }
+  return { args: [...overrideArgs, ...inputArgs], env };
+}
+
+// Codex 0.156 added a shared app-server daemon. Its `codex --help` lists the root
+// --no-daemon flag, and older releases have neither, so the flag in the help text is the
+// gate. A probe that fails reads as an old Codex and keeps the launch as it was.
+export function codexSupportsDaemon(binary, env = process.env, run = spawnSync) {
+  const probe = spawnTarget(binary, ['--help'], env);
+  const result = run(probe.file, probe.args, {
+    encoding: 'utf8',
+    env,
+    timeout: 5000,
+    windowsHide: true,
+  });
+  if (result.error || result.status !== 0) return false;
+  return /(?:^|\s)--no-daemon\b/.test(result.stdout || '');
+}
+
+// Root flags that take a value, so the token after them is not the subcommand.
+const CODEX_VALUE_FLAGS = new Set([
+  '-c', '--config', '--enable', '--disable', '--remote', '--remote-auth-token-env',
+  '-i', '--image', '-m', '--model', '--local-provider', '-p', '--profile', '-s', '--sandbox',
+  '-a', '--ask-for-approval', '-C', '--cd', '--add-dir',
+]);
+
+export function codexSubcommand(args) {
+  for (let index = 0; index < args.length; index += 1) {
+    const arg = args[index];
+    if (arg === '--') return null;
+    if (arg.startsWith('-')) {
+      if (CODEX_VALUE_FLAGS.has(arg)) index += 1;
+      continue;
+    }
+    return arg;
+  }
+  return null;
+}
+
+// The shared daemon is started from the user's saved config and never sees this run's
+// -c overrides, so a thread it creates cannot find kenari_router. A TUI session runs
+// on the embedded server (--no-daemon). `codex agents` refuses --no-daemon through
+// 0.166, so it gets an app server of its own, started with the same overrides. A user
+// who picked a server (--remote) or embedded mode (--no-daemon) keeps that choice.
+export function codexDaemonMode(args) {
+  if (args.some((arg) => arg === '--no-daemon' || arg === '--remote' || arg.startsWith('--remote='))) {
+    return 'unchanged';
+  }
+  const subcommand = codexSubcommand(args);
+  if (subcommand === null || subcommand === 'resume' || subcommand === 'fork') return 'no-daemon';
+  if (subcommand === 'agents') return 'private-app-server';
+  return 'unchanged';
+}
+
+// The user's own -c and feature toggles, so the private server runs with the settings
+// the TUI was given. The routing keys among them were refused above.
+function userConfigArgs(args) {
+  const forwarded = [];
+  for (let index = 0; index < args.length; index += 1) {
+    const arg = args[index];
+    if (['-c', '--config', '--enable', '--disable'].includes(arg)) {
+      if (index + 1 < args.length) forwarded.push(arg, args[index + 1]);
+      index += 1;
+    } else if (/^--(?:config|enable|disable)=/.test(arg)) {
+      forwarded.push(arg);
+    }
+  }
+  return forwarded;
+}
+
+// On Unix Codex binds the real socket in /tmp/codex-daemon-<uid>, named by the SHA-256
+// of the requested path, and leaves a symlink at that path. It removes both on a clean
+// exit. These are the files a killed server would leave behind.
+export function codexSocketLeftovers(socketPath, platform = process.platform) {
+  if (platform === 'win32' || typeof process.geteuid !== 'function') return [];
+  try {
+    const requested = path.join(fs.realpathSync(path.dirname(socketPath)), path.basename(socketPath));
+    const hash = createHash('sha256').update(requested).digest('hex');
+    const physical = path.join(fs.realpathSync('/tmp'), `codex-daemon-${process.geteuid()}`, hash);
+    return [physical, `${physical}.lock`];
+  } catch {
+    return [];
+  }
 }
