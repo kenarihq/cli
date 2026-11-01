@@ -43,6 +43,7 @@ import {
 } from './runtime/claude.js';
 import {
   buildCodexLaunch,
+  codexSupportsDaemon,
   loadCodexNativeModels,
   resolveCodexNativeBase,
 } from './runtime/codex.js';
@@ -741,9 +742,11 @@ async function runTool(tool, args) {
   let kenariBase;
   let nativeBase;
   let buildLaunch;
+  let codexDaemon = false;
   if (tool === 'codex') {
     kenariBase = `${gatewayBase()}/v1`;
     nativeBase = resolveCodexNativeBase(binary, process.env);
+    codexDaemon = codexSupportsDaemon(binary, process.env);
     buildLaunch = buildCodexLaunch;
   } else if (tool === 'grok') {
     kenariBase = gatewayBase();
@@ -764,6 +767,10 @@ async function runTool(tool, args) {
     if (tool === 'claude') printClaudeEnvOverrides(options.env);
     if (tool === 'grok') printGrokEnvOverrides(options.env);
     printEffortCapabilities(tool, toolConfig, cache);
+    if (built.sidecar) {
+      console.error('kenari: agents run on a private Codex app server for this session.');
+      console.error('        Sessions started here stop when you quit.');
+    }
     return built;
   };
   try {
@@ -793,6 +800,7 @@ async function runTool(tool, args) {
       runtimeOptions: {
         toolConfig,
         catalogPath,
+        codexDaemon,
         nativeOrigin: tool === 'grok' ? nativeBase : undefined,
         // Never the Kenari key. Stand-in credentials only go in the child env when no
         // slot can reach the native provider, and the router swaps them for the real
